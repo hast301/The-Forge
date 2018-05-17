@@ -410,7 +410,7 @@ def BuildLinuxProjects():
 						ubuntuProjects.append(child.attrib["Name"])
 			
 			for proj in ubuntuProjects:
-				command = ["codelite-make","-w",filename,"-p", proj,"-c",conf]
+				command = ["/usr/bin/codelite-make","-w",filename,"-p", proj,"-c",conf]
 				#sucess = ExecuteBuild(command, filename+"/"+proj,conf, "Ubuntu")
 				sucess = ExecuteCommand(command, subprocess.PIPE)
 				
