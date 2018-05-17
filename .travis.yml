@@ -1,6 +1,19 @@
+sudo: required
 os:
 - linux
 language:
 - cpp
+
+before_install:
+- if [[ "$TRAVIS_OS_NAME" == "linux" ]]; then sudo apt-get install; fi
+
+install:
+- if [[ "$TRAVIS_OS_NAME" == "linux" ]]; then sudo apt-get -qq update; fi
+- if [[ "$TRAVIS_OS_NAME" == "linux" ]]; then sudo apt-get install -y libassimp-dev libglm-dev graphviz libxcb-dri3-0 libxcb-present0 libpciaccess0 cmake libpng-dev libxcb-dri3-dev libx11-dev libx11-xcb-dev libmirclient-dev libwayland-dev libxrandr-dev; fi
+- if [[ "$TRAVIS_OS_NAME" == "linux" ]]; then wget -O vulkansdk-linux-x86_64-1.1.73.0.run https://sdk.lunarg.com/sdk/download/1.1.73.0/linux/vulkansdk-linux-x86_64-1.1.73.0.run; fi
+- if [[ "$TRAVIS_OS_NAME" == "linux" ]]; then chmod ugo+x vulkansdk-linux-x86_64-1.1.73.0.run; fi
+- if [[ "$TRAVIS_OS_NAME" == "linux" ]]; then ./vulkansdk-linux-x86_64-1.1.73.0.run; fi
+- if [[ "$TRAVIS_OS_NAME" == "linux" ]]; then export VULKAN_SDK=$TRAVIS_BUILD_DIR/VulkanSDK/1.1.73.0/x86_64; fi
+
 script:
 - python PyBuild.py
