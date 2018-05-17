@@ -9,7 +9,7 @@ before_install:
 
 install:
 - if [[ "$TRAVIS_OS_NAME" == "linux" ]]; then sudo apt-get -qq update; fi
-- if [[ "$TRAVIS_OS_NAME" == "linux" ]]; then sudo apt-get install -y libassimp-dev libglm-dev graphviz libxcb-dri3-0 libxcb-present0 libpciaccess0 cmake libpng-dev libxcb-dri3-dev libx11-dev libx11-xcb-dev libmirclient-dev libwayland-dev libxrandr-dev; fi
+- if [[ "$TRAVIS_OS_NAME" == "linux" ]]; then sudo apt-get install -y codelite; fi
 - if [[ "$TRAVIS_OS_NAME" == "linux" ]]; then wget -O vulkansdk-linux-x86_64-1.1.73.0.run https://sdk.lunarg.com/sdk/download/1.1.73.0/linux/vulkansdk-linux-x86_64-1.1.73.0.run; fi
 - if [[ "$TRAVIS_OS_NAME" == "linux" ]]; then chmod ugo+x vulkansdk-linux-x86_64-1.1.73.0.run; fi
 - if [[ "$TRAVIS_OS_NAME" == "linux" ]]; then ./vulkansdk-linux-x86_64-1.1.73.0.run; fi
