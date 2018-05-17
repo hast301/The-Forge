@@ -33,7 +33,7 @@
 // 
 
 
-
+/*
 
 // when we are in windowed mode and the user wants to resize the window with the mouse
 void onResize(RectDesc rect);
@@ -67,7 +67,7 @@ void update(float deltaTime);
 
 // only Graphics API draw calls and command buffer generation
 void drawFrame(float deltaTime);
-
+*/
 
 // Device Change
 // so what is going to happen if the user changes the graphics device?
@@ -98,14 +98,17 @@ public:
 	struct Settings
 	{
 		/// Window width
-		int32_t mWidth = -1;
+		int32_t	mWidth = -1;
 		/// Window height
-		int32_t mHeight = -1;
+		int32_t	mHeight = -1;
 		/// Set to true if fullscreen mode has been requested
-		bool mFullScreen = false;
+		bool	mFullScreen = false;
+		/// Set to true if app wants to use an external window
+		bool	mExternalWindow = false;
 	} mSettings;
 
 	WindowsDesc* pWindow;
+	String mCommandLine;
 };
 
 #if defined(_DURANGO)
@@ -143,6 +146,15 @@ int main(int argc, const char* argv[])                          \
 {																\
     appClass app;												\
     return macOSMain(argc, argv, &app);							\
+}
+#elif defined(__linux__)
+#define DEFINE_APPLICATION_MAIN(appClass)						\
+extern int LinuxMain(int argc, char** argv, IApp* app);			\
+																\
+int main(int argc, char** argv)									\
+{																\
+	appClass app;												\
+	return LinuxMain(argc, argv, &app);							\
 }
 #else
 #endif

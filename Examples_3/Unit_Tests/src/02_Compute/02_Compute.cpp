@@ -28,27 +28,27 @@
 // using Julia 4D demonstration
 
 //tiny stl
-#include "../../Common_3/ThirdParty/OpenSource/TinySTL/vector.h"
-#include "../../Common_3/ThirdParty/OpenSource/TinySTL/string.h"
+#include "../../../../Common_3/ThirdParty/OpenSource/TinySTL/vector.h"
+#include "../../../../Common_3/ThirdParty/OpenSource/TinySTL/string.h"
 
 //Interfaces
-#include "../../Common_3/OS/Interfaces/ICameraController.h"
-#include "../../Common_3/OS/Interfaces/ILogManager.h"
-#include "../../Common_3/OS/Interfaces/IFileSystem.h"
-#include "../../Common_3/OS/Interfaces/ITimeManager.h"
-#include "../../Common_3/Renderer/IRenderer.h"
-#include "../../Common_3/OS/Interfaces/IApp.h"
-#include "../../Common_3/Renderer/GpuProfiler.h"
-#include "../../Common_3/Renderer/ResourceLoader.h"
+#include "../../../../Common_3/OS/Interfaces/ICameraController.h"
+#include "../../../../Common_3/OS/Interfaces/ILogManager.h"
+#include "../../../../Common_3/OS/Interfaces/IFileSystem.h"
+#include "../../../../Common_3/OS/Interfaces/ITimeManager.h"
+#include "../../../../Common_3/Renderer/IRenderer.h"
+#include "../../../../Common_3/OS/Interfaces/IApp.h"
+#include "../../../../Common_3/Renderer/GpuProfiler.h"
+#include "../../../../Common_3/Renderer/ResourceLoader.h"
 
 //Math
-#include "../../Common_3/OS/Math/Noise.h"
-#include "../../Common_3/OS/Math/MathTypes.h"
+#include "../../../../Common_3/OS/Math/MathTypes.h"
 
 //ui
-#include "../../Common_3/OS/Interfaces/IUIManager.h"
+#include "../../../../Middleware_3/UI/AppUI.h"
+#include "../../../../Common_3/OS/Core/DebugRenderer.h"
 
-#include "../../Common_3/OS/Interfaces/IMemoryManager.h"
+#include "../../../../Common_3/OS/Interfaces/IMemoryManager.h"
 
 /// Camera Controller
 #define GUI_CAMERACONTROLLER 1
@@ -96,7 +96,11 @@ HiresTimer gTimer;
 #if defined(DIRECT3D12)
 #define RESOURCE_DIR "PCDX12"
 #elif defined(VULKAN)
-#define RESOURCE_DIR "PCVulkan"
+	#if defined(_WIN32)
+	#define RESOURCE_DIR "PCVulkan"
+	#elif defined(LINUX)
+	#define RESOURCE_DIR "LINUXVulkan"
+	#endif
 #elif defined(METAL)
 #define RESOURCE_DIR "OSXMetal"
 #elif defined(_DURANGO)
@@ -166,7 +170,7 @@ Texture*            pVirtualJoystickTex = nullptr;
 uint32_t			gFrameIndex = 0;
 UniformBlock		gUniformData;
 
-UIManager*			pUIManager = nullptr;
+UIApp				gAppUI;
 GpuProfiler*		pGpuProfiler = nullptr;
 ICameraController*	pCameraController = nullptr;
 
@@ -174,6 +178,8 @@ struct ObjectProperty
 {
   float rotX = 0, rotY = 0;
 } gObjSettings;
+
+DebugTextDrawDesc gFrameTimeDraw = DebugTextDrawDesc(0, 0xff00ffff, 18);
 
 class Compute : public IApp
 {
@@ -200,10 +206,9 @@ public:
 		addSemaphore(pRenderer, &pImageAcquiredSemaphore);
 
 		initResourceLoaderInterface(pRenderer, DEFAULT_MEMORY_BUDGET);
-		addGpuProfiler(pRenderer, pGraphicsQueue, &pGpuProfiler);
+		initDebugRendererInterface(pRenderer, FileSystem::FixPath("TitilliumText/TitilliumText-Bold.ttf", FSR_Builtin_Fonts));
 
-		if (!Load())
-			return false;
+		addGpuProfiler(pRenderer, pGraphicsQueue, &pGpuProfiler);
         
 #ifdef TARGET_IOS
         // Add virtual joystick texture.
@@ -224,27 +229,29 @@ public:
 		addShader(pRenderer, &displayShader, &pShader);
 		addShader(pRenderer, &computeShader, &pComputeShader);
 
-		addRasterizerState(&pRast, CULL_MODE_NONE);
-		addSampler(pRenderer, &pSampler, FILTER_NEAREST, FILTER_NEAREST, MIPMAP_MODE_NEAREST,
-			ADDRESS_MODE_CLAMP_TO_EDGE, ADDRESS_MODE_CLAMP_TO_EDGE, ADDRESS_MODE_CLAMP_TO_EDGE);
+		RasterizerStateDesc rasterizerStateDesc = {};
+		rasterizerStateDesc.mCullMode = CULL_MODE_NONE;
+		addRasterizerState(pRenderer, &rasterizerStateDesc, &pRast);
 
+		SamplerDesc samplerDesc = {
+			FILTER_NEAREST, FILTER_NEAREST, MIPMAP_MODE_NEAREST,
+			ADDRESS_MODE_CLAMP_TO_EDGE, ADDRESS_MODE_CLAMP_TO_EDGE, ADDRESS_MODE_CLAMP_TO_EDGE
+		};
+		addSampler(pRenderer, &samplerDesc, &pSampler);
+
+		const char* pStaticSamplers[] = { "uSampler0" };
 		RootSignatureDesc rootDesc = {};
-		rootDesc.mStaticSamplers["uSampler0"] = pSampler;
-		addRootSignature(pRenderer, 1, &pShader, &pRootSignature, &rootDesc);
+		rootDesc.mStaticSamplerCount = 1;
+		rootDesc.ppStaticSamplerNames = pStaticSamplers;
+		rootDesc.ppStaticSamplers = &pSampler;
+		rootDesc.mShaderCount = 1;
+		rootDesc.ppShaders = &pShader;
+		addRootSignature(pRenderer, &rootDesc, &pRootSignature);
 
-		addRootSignature(pRenderer, 1, &pComputeShader, &pComputeRootSignature);
-
-		VertexLayout vertexLayout = {};
-		vertexLayout.mAttribCount = 0;
-		GraphicsPipelineDesc pipelineSettings = { 0 };
-		pipelineSettings.mPrimitiveTopo = PRIMITIVE_TOPO_TRI_LIST;
-		pipelineSettings.pRasterizerState = pRast;
-		pipelineSettings.mRenderTargetCount = 1;
-		pipelineSettings.ppRenderTargets = &pSwapChain->ppSwapchainRenderTargets[0];
-		pipelineSettings.pVertexLayout = &vertexLayout;
-		pipelineSettings.pRootSignature = pRootSignature;
-		pipelineSettings.pShaderProgram = pShader;
-		addPipeline(pRenderer, &pipelineSettings, &pPipeline);
+		RootSignatureDesc computeRootDesc = {};
+		computeRootDesc.mShaderCount = 1;
+		computeRootDesc.ppShaders = &pComputeShader;
+		addRootSignature(pRenderer, &computeRootDesc, &pComputeRootSignature);
 
 		ComputePipelineDesc computePipelineDesc = { 0 };
 		computePipelineDesc.pRootSignature = pComputeRootSignature;
@@ -279,9 +286,10 @@ public:
 		normalize(gCameraProp.mCameraRight);
 #endif
 
-		UISettings uiSettings = {};
-		uiSettings.pDefaultFontName = "TitilliumText/TitilliumText-Bold.ttf";
-		addUIManagerInterface(pRenderer, &uiSettings, &pUIManager);
+		if (!gAppUI.Init(pRenderer))
+			return false;
+
+		gAppUI.LoadFont(FileSystem::FixPath("TitilliumText/TitilliumText-Bold.ttf", FSR_Builtin_Fonts));
 
 #if USE_CAMERACONTROLLER
 		CameraMotionParameters cmp{ 100.0f, 150.0f, 300.0f };
@@ -318,15 +326,15 @@ public:
 
 	void Exit()
 	{
-		waitForFences(pGraphicsQueue, 1, &pRenderCompleteFences[gFrameIndex % gImageCount]);
+		waitForFences(pGraphicsQueue, 1, &pRenderCompleteFences[gFrameIndex % gImageCount], true);
 
 #if USE_CAMERACONTROLLER
 		destroyCameraController(pCameraController);
 #endif
 
-		removeUIManagerInterface(pRenderer, pUIManager);
+		removeDebugRendererInterface();
 
-		Unload();
+		gAppUI.Exit();
 
 		for (uint32_t i = 0; i < gImageCount; ++i)
 		{
@@ -347,7 +355,6 @@ public:
 
 		removeShader(pRenderer, pShader);
 		removeShader(pRenderer, pComputeShader);
-		removePipeline(pRenderer, pPipeline);
 		removePipeline(pRenderer, pComputePipeline);
 		removeRootSignature(pRenderer, pRootSignature);
 		removeRootSignature(pRenderer, pComputeRootSignature);
@@ -360,40 +367,41 @@ public:
 
 	bool Load()
 	{
-		SwapChainDesc swapChainDesc = {};
-		swapChainDesc.pWindow = pWindow;
-		swapChainDesc.pQueue = pGraphicsQueue;
-		swapChainDesc.mWidth = mSettings.mWidth;
-		swapChainDesc.mHeight = mSettings.mHeight;
-		swapChainDesc.mImageCount = gImageCount;
-		swapChainDesc.mSampleCount = SAMPLE_COUNT_1;
-		swapChainDesc.mColorFormat = getRecommendedSwapchainFormat(true);
-		swapChainDesc.mEnableVsync = false;
-		addSwapChain(pRenderer, &swapChainDesc, &pSwapChain);
+		if (!addSwapChain())
+			return false;
 
-		// Create empty texture for output of compute shader
-		TextureLoadDesc textureDesc = {};
-		TextureDesc desc = {};
-		desc.mType = TEXTURE_TYPE_2D;
-		desc.mWidth = mSettings.mWidth;
-		desc.mHeight = mSettings.mHeight;
-		desc.mDepth = 1;
-		desc.mArraySize = 1;
-		desc.mMipLevels = 1;
-		desc.mFormat = ImageFormat::RGBA8;
-		desc.mUsage = (TextureUsage)(TEXTURE_USAGE_SAMPLED_IMAGE | TEXTURE_USAGE_UNORDERED_ACCESS);
-		desc.mSampleCount = SAMPLE_COUNT_1;
-		desc.mHostVisible = false;
-		textureDesc.pDesc = &desc;
-		textureDesc.ppTexture = &pTextureComputeOutput;
-		addResource(&textureDesc);
+		if (!addJuliaFractalUAV())
+			return false;
+
+		if (!gAppUI.Load(pSwapChain->ppSwapchainRenderTargets))
+			return false;
+
+		VertexLayout vertexLayout = {};
+		vertexLayout.mAttribCount = 0;
+		GraphicsPipelineDesc pipelineSettings = { 0 };
+		pipelineSettings.mPrimitiveTopo = PRIMITIVE_TOPO_TRI_LIST;
+		pipelineSettings.pRasterizerState = pRast;
+		pipelineSettings.mRenderTargetCount = 1;
+		pipelineSettings.pColorFormats = &pSwapChain->ppSwapchainRenderTargets[0]->mDesc.mFormat;
+		pipelineSettings.pSrgbValues = &pSwapChain->ppSwapchainRenderTargets[0]->mDesc.mSrgb;
+		pipelineSettings.mSampleCount = pSwapChain->ppSwapchainRenderTargets[0]->mDesc.mSampleCount;
+		pipelineSettings.mSampleQuality = pSwapChain->ppSwapchainRenderTargets[0]->mDesc.mSampleQuality;
+		pipelineSettings.pVertexLayout = &vertexLayout;
+		pipelineSettings.pRootSignature = pRootSignature;
+		pipelineSettings.pShaderProgram = pShader;
+		addPipeline(pRenderer, &pipelineSettings, &pPipeline);
 
 		return true;
 	}
 
 	void Unload()
 	{
-		waitForFences(pGraphicsQueue, 1, &pRenderCompleteFences[gFrameIndex % gImageCount]);
+		waitForFences(pGraphicsQueue, 1, &pRenderCompleteFences[gFrameIndex % gImageCount], true);
+
+		gAppUI.Unload();
+
+		removePipeline(pRenderer, pPipeline);
+
 		removeResource(pTextureComputeOutput);
 		removeSwapChain(pRenderer, pSwapChain);
 	}
@@ -496,7 +504,7 @@ public:
 		BufferUpdateDesc cbvUpdate = { pUniformBuffer, &gUniformData };
 		updateResource(&cbvUpdate);
 
-		const uint32_t* pThreadGroupSize = pComputeShader->mNumThreadsPerGroup;
+		const uint32_t* pThreadGroupSize = pComputeShader->mReflection.mStageReflections[0].mNumThreadsPerGroup;
 
 		cmdBeginGpuTimestampQuery(cmd, pGpuProfiler, "Compute Pass");
 
@@ -511,6 +519,7 @@ public:
 		cmdBindDescriptors(cmd, pComputeRootSignature, 2, params);
 
 		cmdDispatch(cmd, pTextureComputeOutput->mDesc.mWidth / pThreadGroupSize[0], pTextureComputeOutput->mDesc.mHeight / pThreadGroupSize[1], pThreadGroupSize[2]);
+
 		cmdEndGpuTimestampQuery(cmd, pGpuProfiler);
 
 		TextureBarrier barriers[] = {
@@ -519,7 +528,7 @@ public:
 		};
 		cmdResourceBarrier(cmd, 0, NULL, 2, barriers, false);
 
-		cmdBeginRender(cmd, 1, &pRenderTarget, NULL, &loadActions);
+		cmdBindRenderTargets(cmd, 1, &pRenderTarget, NULL, &loadActions);
 		cmdSetViewport(cmd, 0.0f, 0.0f, (float)pRenderTarget->mDesc.mWidth, (float)pRenderTarget->mDesc.mHeight, 0.0f, 1.0f);
 		cmdSetScissor(cmd, 0, 0, pRenderTarget->mDesc.mWidth, pRenderTarget->mDesc.mHeight);
 
@@ -533,41 +542,40 @@ public:
 		cmdDraw(cmd, 3, 0);
 		cmdEndGpuTimestampQuery(cmd, pGpuProfiler);
 
-		static HiresTimer timer;
-		cmdUIBeginRender(cmd, pUIManager, 1, &pRenderTarget, NULL);
+		gTimer.GetUSec(true);
         
 #ifdef TARGET_IOS
-        // Draw the camera controller's virtual joysticks.
-        float extSide = min(mSettings.mHeight, mSettings.mWidth) * pCameraController->getVirtualJoystickExternalRadius();
-        float intSide = min(mSettings.mHeight, mSettings.mWidth) * pCameraController->getVirtualJoystickInternalRadius();
-        
-        vec2 joystickSize = vec2(extSide);
-        vec2 leftJoystickCenter = pCameraController->getVirtualLeftJoystickCenter();
-        vec2 leftJoystickPos = vec2(leftJoystickCenter.getX() * mSettings.mWidth, leftJoystickCenter.getY() * mSettings.mHeight) - 0.5f * joystickSize;
-        cmdUIDrawTexturedQuad(cmd, pUIManager, leftJoystickPos, joystickSize, pVirtualJoystickTex);
-        vec2 rightJoystickCenter = pCameraController->getVirtualRightJoystickCenter();
-        vec2 rightJoystickPos = vec2(rightJoystickCenter.getX() * mSettings.mWidth, rightJoystickCenter.getY() * mSettings.mHeight) - 0.5f * joystickSize;
-        cmdUIDrawTexturedQuad(cmd, pUIManager, rightJoystickPos, joystickSize, pVirtualJoystickTex);
-        
-        joystickSize = vec2(intSide);
-        leftJoystickCenter = pCameraController->getVirtualLeftJoystickPos();
-        leftJoystickPos = vec2(leftJoystickCenter.getX() * mSettings.mWidth, leftJoystickCenter.getY() * mSettings.mHeight) - 0.5f * joystickSize;
-        cmdUIDrawTexturedQuad(cmd, pUIManager, leftJoystickPos, joystickSize, pVirtualJoystickTex);
-        rightJoystickCenter = pCameraController->getVirtualRightJoystickPos();
-        rightJoystickPos = vec2(rightJoystickCenter.getX() * mSettings.mWidth, rightJoystickCenter.getY() * mSettings.mHeight) - 0.5f * joystickSize;
-        cmdUIDrawTexturedQuad(cmd, pUIManager, rightJoystickPos, joystickSize, pVirtualJoystickTex);
+		// Draw the camera controller's virtual joysticks.
+		float extSide = min(mSettings.mHeight, mSettings.mWidth) * pCameraController->getVirtualJoystickExternalRadius();
+		float intSide = min(mSettings.mHeight, mSettings.mWidth) * pCameraController->getVirtualJoystickInternalRadius();
+
+		float2 joystickSize = float2(extSide);
+		vec2 leftJoystickCenter = pCameraController->getVirtualLeftJoystickCenter();
+		float2 leftJoystickPos = float2(leftJoystickCenter.getX() * mSettings.mWidth, leftJoystickCenter.getY() * mSettings.mHeight) - 0.5f * joystickSize;
+		drawDebugTexture(cmd, leftJoystickPos.x, leftJoystickPos.y, joystickSize.x, joystickSize.y, pVirtualJoystickTex, 1.0f, 1.0f, 1.0f);
+		vec2 rightJoystickCenter = pCameraController->getVirtualRightJoystickCenter();
+		float2 rightJoystickPos = float2(rightJoystickCenter.getX() * mSettings.mWidth, rightJoystickCenter.getY() * mSettings.mHeight) - 0.5f * joystickSize;
+		drawDebugTexture(cmd, rightJoystickPos.x, rightJoystickPos.y, joystickSize.x, joystickSize.y, pVirtualJoystickTex, 1.0f, 1.0f, 1.0f);
+
+		joystickSize = float2(intSide);
+		leftJoystickCenter = pCameraController->getVirtualLeftJoystickPos();
+		leftJoystickPos = float2(leftJoystickCenter.getX() * mSettings.mWidth, leftJoystickCenter.getY() * mSettings.mHeight) - 0.5f * joystickSize;
+		drawDebugTexture(cmd, leftJoystickPos.x, leftJoystickPos.y, joystickSize.x, joystickSize.y, pVirtualJoystickTex, 1.0f, 1.0f, 1.0f);
+		rightJoystickCenter = pCameraController->getVirtualRightJoystickPos();
+		rightJoystickPos = float2(rightJoystickCenter.getX() * mSettings.mWidth, rightJoystickCenter.getY() * mSettings.mHeight) - 0.5f * joystickSize;
+		drawDebugTexture(cmd, rightJoystickPos.x, rightJoystickPos.y, joystickSize.x, joystickSize.y, pVirtualJoystickTex, 1.0f, 1.0f, 1.0f);
 #endif
 
-		cmdUIDrawFrameTime(cmd, pUIManager, { 8, 15 }, "CPU ", timer.GetUSec(true) / 1000.0f);
+		drawDebugText(cmd, 8, 15, String::format("CPU %f ms", gTimer.GetUSecAverage() / 1000.0f), &gFrameTimeDraw);
 
 #ifndef METAL // Metal doesn't support GPU profilers
-		cmdUIDrawFrameTime(cmd, pUIManager, { 8, 40 }, "GPU ", (float)pGpuProfiler->mCumulativeTime * 1000.0f);
+		drawDebugText(cmd, 8, 40, String::format("GPU %f ms", (float)pGpuProfiler->mCumulativeTime * 1000.0f), &gFrameTimeDraw);
+		drawDebugGpuProfile(cmd, 8, 65, pGpuProfiler, NULL);
 #endif
 
-		cmdUIDrawGpuProfileData(cmd, pUIManager, { 8, 65 }, pGpuProfiler);
-		cmdUIEndRender(cmd, pUIManager);
+		gAppUI.Draw(cmd);
 
-		cmdEndRender(cmd, 1, &pRenderTarget, NULL);
+		cmdBindRenderTargets(cmd, 0, NULL, NULL, NULL);
 
 		barriers[0] = { pRenderTarget->pTexture, RESOURCE_STATE_PRESENT };
 		barriers[1] = { pTextureComputeOutput, RESOURCE_STATE_UNORDERED_ACCESS };
@@ -579,17 +587,57 @@ public:
 		queueSubmit(pGraphicsQueue, 1, &cmd, pRenderCompleteFence, 1, &pImageAcquiredSemaphore, 1, &pRenderCompleteSemaphore);
 		queuePresent(pGraphicsQueue, pSwapChain, gFrameIndex, 1, &pRenderCompleteSemaphore);
 
+		HiresTimer timer;
 		// Stall if CPU is running "Swap Chain Buffer Count - 1" frames ahead of GPU
 		Fence* pNextFence = pRenderCompleteFences[(gFrameIndex + 1) % gImageCount];
 		FenceStatus fenceStatus;
-		getFenceStatus(pNextFence, &fenceStatus);
+		getFenceStatus(pRenderer, pNextFence, &fenceStatus);
 		if (fenceStatus == FENCE_STATUS_INCOMPLETE)
-			waitForFences(pGraphicsQueue, 1, &pNextFence);
+			waitForFences(pGraphicsQueue, 1, &pNextFence, false);
 	}
 
 	String GetName()
 	{
-		return "02_Compute";
+		return "UnitTest_02_Compute";
+	}
+
+	bool addSwapChain()
+	{
+		SwapChainDesc swapChainDesc = {};
+		swapChainDesc.pWindow = pWindow;
+		swapChainDesc.ppPresentQueues = &pGraphicsQueue;
+		swapChainDesc.mPresentQueueCount = 1;
+		swapChainDesc.mWidth = mSettings.mWidth;
+		swapChainDesc.mHeight = mSettings.mHeight;
+		swapChainDesc.mImageCount = gImageCount;
+		swapChainDesc.mSampleCount = SAMPLE_COUNT_1;
+		swapChainDesc.mColorFormat = getRecommendedSwapchainFormat(true);
+		swapChainDesc.mEnableVsync = false;
+		::addSwapChain(pRenderer, &swapChainDesc, &pSwapChain);
+
+		return pSwapChain != NULL;
+	}
+
+	bool addJuliaFractalUAV()
+	{
+		// Create empty texture for output of compute shader
+		TextureLoadDesc textureDesc = {};
+		TextureDesc desc = {};
+		desc.mType = TEXTURE_TYPE_2D;
+		desc.mWidth = mSettings.mWidth;
+		desc.mHeight = mSettings.mHeight;
+		desc.mDepth = 1;
+		desc.mArraySize = 1;
+		desc.mMipLevels = 1;
+		desc.mFormat = ImageFormat::RGBA8;
+		desc.mUsage = (TextureUsage)(TEXTURE_USAGE_SAMPLED_IMAGE | TEXTURE_USAGE_UNORDERED_ACCESS);
+		desc.mSampleCount = SAMPLE_COUNT_1;
+		desc.mHostVisible = false;
+		textureDesc.pDesc = &desc;
+		textureDesc.ppTexture = &pTextureComputeOutput;
+		addResource(&textureDesc);
+
+		return pTextureComputeOutput != NULL;
 	}
 
 	void RecenterCameraView(float maxDistance, vec3 lookAt = vec3(0))

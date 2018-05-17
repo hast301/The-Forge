@@ -25,7 +25,6 @@
 #pragma once
 
 #if defined(_WIN32)
-
 #include <sys/stat.h>
 #if !defined(_DURANGO)
 #include <shlwapi.h>
@@ -50,6 +49,19 @@ typedef HINSTANCE HINST;
 #include <stdint.h>
 typedef uint64_t uint64;
 #endif
+#endif
+
+#if defined(__linux__)
+#define VK_USE_PLATFORM_XLIB_KHR
+#if defined(VK_USE_PLATFORM_XLIB_KHR) || defined(VK_USE_PLATFORM_XCB_KHR)
+#include <X11/Xutil.h>
+#endif
+#endif
+
+#ifdef _WIN32
+#define CALLTYPE __cdecl
+#else
+#define CALLTYPE
 #endif
 
 #include <stdio.h>
@@ -94,12 +106,24 @@ inline int getRectHeight(const RectDesc& rect)
 
 typedef struct WindowsDesc
 {
+#if defined(VK_USE_PLATFORM_XLIB_KHR)
+ 	Display *display;
+ 	Window xlib_window;
+ 	Atom xlib_wm_delete_window;
+#elif defined(VK_USE_PLATFORM_XCB_KHR)
+ 	Display *display;
+ 	xcb_connection_t *connection;
+ 	xcb_screen_t *screen;
+ 	xcb_window_t xcb_window;
+ 	xcb_intern_atom_reply_t *atom_wm_delete_window;
+#else
+	WindowHandle handle = NULL; //hWnd
+#endif	
 	RectDesc windowedRect;
 	RectDesc fullscreenRect;
 	RectDesc clientRect;
 	bool fullScreen = false;
 	unsigned windowsFlags = 0;
-	WindowHandle handle = NULL;
 	IconHandle bigIcon = NULL;
 	IconHandle smallIcon = NULL;
 
@@ -168,6 +192,11 @@ typedef unsigned __int64 uint64;
 typedef unsigned long DWORD;
 typedef unsigned int UINT;
 //typedef bool BOOL;
+#elif defined(__linux__)
+typedef unsigned long DWORD;
+typedef unsigned int UINT;
+typedef int64_t  int64;
+typedef uint64_t uint64;
 #else
 typedef   signed long long  int64;
 typedef unsigned long long uint64;

@@ -23,7 +23,7 @@
 */
 
 #include "../Interfaces/IOperatingSystem.h"
-#include "../Math/FloatUtil.h"
+#include "../Math/MathTypes.h"
 #include "../../ThirdParty/OpenSource/TinySTL/vector.h"
 
 #ifndef _THREAD_H_
@@ -128,7 +128,7 @@ public:
 	void Shutdown() { mShutDown = true; }
 	void Complete(unsigned priority);
 
-	unsigned GetNumThreads() const { return mThreads.getCount(); }
+	unsigned GetNumThreads() const { return (uint32_t)mThreads.size(); }
 	bool IsCompleted(unsigned priority) const;
 	bool IsCompleting() const { return mCompleting; }
 

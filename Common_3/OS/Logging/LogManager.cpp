@@ -57,9 +57,8 @@ LogManager::LogManager(LogLevel level /* = LogLevel::LL_Debug */) :
 	pLogFile(nullptr)
 {
 	pLogInstance = this;
-#ifndef METAL // TODO: fix this
+
 	Open(FileSystem::GetCurrentDir() + "Log.log");
-#endif
 
 	Thread::SetMainThread();
 }
@@ -72,7 +71,7 @@ LogManager::~LogManager()
 
 void LogManager::Open(const String& fileName)
 {
-	if (fileName.isEmpty())
+	if (fileName.size() == 0)
 		return;
 
 	if (pLogFile && pLogFile->IsOpen())
@@ -90,6 +89,7 @@ void LogManager::Open(const String& fileName)
 	{
 		pLogFile->~File();
 		conf_free(pLogFile);
+		pLogFile = NULL;
 		Write(LogLevel::LL_Error, "Failed to create log file " + fileName);
 	}
 }
@@ -185,7 +185,7 @@ void LogManager::WriteRaw(const String& message, bool error)
 
 	if (pLogInstance->pLogFile)
 	{
-		pLogInstance->pLogFile->Write(message.c_str(), message.getLength());
+		pLogInstance->pLogFile->Write(message.c_str(), (uint32_t)message.size());
 		pLogInstance->pLogFile->Flush();
 	}
 

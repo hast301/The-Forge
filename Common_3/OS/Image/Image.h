@@ -66,7 +66,7 @@ public:
   Image(const Image &img);
 
   unsigned char *Create(const ImageFormat::Enum fmt, const int w, const int h, const int d, const int mipMapCount, const int arraySize = 1);
-  void RedefineDimensions(const ImageFormat::Enum fmt, const int w, const int h, const int d);
+  void RedefineDimensions(const ImageFormat::Enum fmt, const int w, const int h, const int d, const int mipMapCount, const int arraySize = 1);
   void Destroy();
   void Clear();
 
@@ -74,6 +74,8 @@ public:
   unsigned char *GetPixels (const uint mipMapLevel) const;
   unsigned char *GetPixels (unsigned char* pDstData, const uint mipMapLevel, const uint dummy);
   unsigned char *GetPixels(const uint mipMapLevel, const uint arraySlice) const;
+
+  void SetPixels(unsigned char* pixelData) { mOwnsMemory = false; pData = pixelData; }
 
   uint GetWidth() const { return mWidth; }
   uint GetHeight() const { return mHeight; }
@@ -83,7 +85,7 @@ public:
   uint GetDepth(const int mipMapLevel) const;
   uint GetMipMapCount() const { return mMipMapCount; }
   uint GetMipMapCountFromDimensions() const;
-  uint GetArraySliceSize(const uint mipMapLevel = 0, ImageFormat::Enum srcFormat = ImageFormat::None) const;
+  uint GetArraySliceSize(const uint mipMapLevel = 0, ImageFormat::Enum srcFormat = ImageFormat::NONE) const;
   uint GetNumberOfPixels(const uint firstMipLevel = 0, uint numMipLevels = ALL_MIPLEVELS) const;
   bool GetColorRange(float &min, float &max);
   bool Normalize();
@@ -94,7 +96,7 @@ public:
   bool GenerateMipMaps(const uint32_t mipMaps = ALL_MIPLEVELS);
 
   uint GetArrayCount() const { return mArrayCount; }
-  uint GetMipMappedSize(const uint firstMipLevel = 0, uint numMipLevels = ALL_MIPLEVELS, ImageFormat::Enum srcFormat = ImageFormat::None) const;
+  uint GetMipMappedSize(const uint firstMipLevel = 0, uint numMipLevels = ALL_MIPLEVELS, ImageFormat::Enum srcFormat = ImageFormat::NONE) const;
   static uint GetMipMappedSize(uint width, uint height, uint depth, uint startMip, uint numLevels, ImageFormat::Enum format);
 
   ImageFormat::Enum getFormat() const { return mFormat; }
@@ -110,7 +112,8 @@ public:
   // Image Format Loading from mData
   bool iLoadDDSFromMemory(const char* memory, uint32_t memsize, const bool useMipMaps, memoryAllocationFunc pAllocator = NULL, void* pUserData = NULL);
   bool iLoadPVRFromMemory(const char* memory, uint32_t memsize, const bool useMipmaps, memoryAllocationFunc pAllocator = NULL, void* pUserData = NULL);
-  bool iLoadKTXFromMemory(const char* memory, uint32_t memsize, const bool useMipmaps, memoryAllocationFunc pAllocator = NULL, void* pUserData = NULL);
+  // #TODO: Implement this method
+  //bool iLoadKTXFromMemory(const char* memory, uint32_t memsize, const bool useMipmaps, memoryAllocationFunc pAllocator = NULL, void* pUserData = NULL);
   bool iLoadSTBIFromMemory(const char *buffer, uint32_t memsize, const bool useMipmaps, memoryAllocationFunc pAllocator = NULL, void* pUserData = NULL);
   bool iLoadSTBIFP32FromMemory(const char *buffer, uint32_t memsize, const bool useMipmaps, memoryAllocationFunc pAllocator = NULL, void* pUserData = NULL);
   bool iLoadEXRFP32FromMemory(const char *buffer, uint32_t memsize, const bool useMipmaps, memoryAllocationFunc pAllocator = NULL, void* pUserData = NULL);

@@ -43,8 +43,8 @@
 #define MAX_KEYS 256
 #define MAX_CURSOR_DELTA 200
 
-#define GETX(l) (int(l & 0xFFFF))
-#define GETY(l) (int(l) >> 16)
+#define GETX(l) ((int)LOWORD(l))
+#define GETY(l) ((int)HIWORD(l))
 
 #define elementsOf(a) (sizeof(a) / sizeof((a)[0]))
 
@@ -186,6 +186,14 @@ LRESULT CALLBACK WinProc(HWND _hwnd, UINT _id, WPARAM wParam, LPARAM lParam)
 	case WM_SIZE:
 		if (gCurrentWindow)
 		{
+			if (wParam == SIZE_MINIMIZED)
+			{
+				gCurrentWindow->minimized = true;
+			}
+			else
+			{
+				gCurrentWindow->minimized = false;
+			}
 			RectDesc rect = { 0 };
 			if (gCurrentWindow->fullScreen)
 			{
@@ -900,6 +908,9 @@ static IApp* pApp = NULL;
 
 static void onResize(const WindowResizeEventData* pData)
 {
+	if (!isRunning())
+		return;
+
 	pApp->mSettings.mWidth = getRectWidth(pData->rect);
 	pApp->mSettings.mHeight = getRectHeight(pData->rect);
 	pApp->mSettings.mFullScreen = pData->pWindow->fullScreen;
@@ -910,6 +921,13 @@ static void onResize(const WindowResizeEventData* pData)
 int WindowsMain(int argc, char** argv, IApp* app)
 {
 	pApp = app;
+
+	//Used for automated testing, if enabled app will exit after 120 frames
+#ifdef AUTOMATED_TESTING
+	uint32_t testingFrameCount = 0;
+	const uint32_t testingDesiredFrameCount = 120;
+#endif
+
 
 	FileSystem::SetCurrentDir(FileSystem::GetProgramDir());
 
@@ -928,13 +946,19 @@ int WindowsMain(int argc, char** argv, IApp* app)
 	window.windowedRect = { 0, 0, (int)pSettings->mWidth, (int)pSettings->mHeight };
 	window.fullScreen = pSettings->mFullScreen;
 	window.maximized = false;
-	openWindow(pApp->GetName(), &window);
+
+	if (!pSettings->mExternalWindow)
+		openWindow(pApp->GetName(), &window);
 
 	pSettings->mWidth = window.fullScreen ? getRectWidth(window.fullscreenRect) : getRectWidth(window.windowedRect);
 	pSettings->mHeight = window.fullScreen ? getRectHeight(window.fullscreenRect) : getRectHeight(window.windowedRect);
 	pApp->pWindow = &window;
+	pApp->mCommandLine = GetCommandLineA();
 
 	if (!pApp->Init())
+		return EXIT_FAILURE;
+
+	if (!pApp->Load())
 		return EXIT_FAILURE;
 
 	registerWindowResizeEvent(onResize);
@@ -947,10 +971,26 @@ int WindowsMain(int argc, char** argv, IApp* app)
 			deltaTime = 0.05f;
 
 		handleMessages();
+
+		// If window is minimized let other processes take over
+		if (window.minimized)
+		{
+			Thread::Sleep(1);
+			continue;
+		}
+
 		pApp->Update(deltaTime);
 		pApp->Draw();
+		
+#ifdef AUTOMATED_TESTING
+		//used in automated tests only.
+			testingFrameCount++;
+			if (testingFrameCount >= testingDesiredFrameCount)
+				break;
+#endif
 	}
 
+	pApp->Unload();
 	pApp->Exit();
 
 	return 0;

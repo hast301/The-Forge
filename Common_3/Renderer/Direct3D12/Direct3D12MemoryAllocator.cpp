@@ -34,10 +34,9 @@
 #endif
 
 #include "Direct3D12Hooks.h"
+#include "Direct3D12MemoryAllocator.h"
 
-#include "..\IMemoryAllocator.h"
-
-void destroyTexture(
+void d3d12_destroyTexture(
 	ResourceAllocator* allocator,
 	Texture* pTexture)
 {
@@ -470,7 +469,7 @@ void resourceAllocSetAllocationUserData(
 		allocation->SetUserData(pUserData);
 }
 
-long createBuffer(
+long d3d12_createBuffer(
 	ResourceAllocator* allocator,
 	const BufferCreateInfo* pCreateInfo,
 	const AllocatorMemoryRequirements* pMemoryRequirements,
@@ -519,7 +518,7 @@ long createBuffer(
 			}
 			else
 			{
-				if (fnHookSpecialBufferAllocation != NULL && fnHookSpecialBufferAllocation(pBuffer, pCreateInfo, allocator))
+				if (fnHookSpecialBufferAllocation != NULL && fnHookSpecialBufferAllocation(allocator->pRenderer, pBuffer, pCreateInfo, allocator))
 				{
 					LOGINFOF("Allocated memory in special platform-specific buffer");
 				}
@@ -529,8 +528,7 @@ long createBuffer(
 						pBuffer->pDxAllocation->GetMemory(), pBuffer->pDxAllocation->GetOffset(),
 						pCreateInfo->pDesc, pCreateInfo->mStartState, NULL,
 						IID_ARGS(&pBuffer->pDxResource));
-
-					pBuffer->pDxResource->SetName(L"PLACED BUFFER RESOURCE");
+					pBuffer->pDxResource->SetName(pCreateInfo->pDebugName? pCreateInfo->pDebugName : L"PLACED BUFFER RESOURCE");
 				}
 				if (pMemoryRequirements->flags & RESOURCE_MEMORY_REQUIREMENT_PERSISTENT_MAP_BIT)
 				{
@@ -554,6 +552,10 @@ long createBuffer(
 				heapProps.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_WRITE_COMBINE;
 				heapProps.Type = D3D12_HEAP_TYPE_CUSTOM;
 				heapProps.MemoryPoolPreference = D3D12_MEMORY_POOL_L0;
+				heapProps.CreationNodeMask = (1 << pBuffer->mDesc.mNodeIndex);
+				heapProps.VisibleNodeMask = heapProps.CreationNodeMask;
+				for (uint32_t i = 0; i < pBuffer->mDesc.mSharedNodeIndexCount; ++i)
+					heapProps.VisibleNodeMask |= (1 << pBuffer->mDesc.pSharedNodeIndices[i]);
 
 				res = allocator->m_hDevice->CreateCommittedResource(
 					&heapProps, D3D12_HEAP_FLAG_NONE,
@@ -562,12 +564,18 @@ long createBuffer(
 			}
 			else
 			{
+				D3D12_HEAP_PROPERTIES heapProps = gHeapProperties[pBuffer->pDxAllocation->GetMemoryTypeIndex()].mProps;
+				heapProps.CreationNodeMask = (1 << pBuffer->mDesc.mNodeIndex);
+				heapProps.VisibleNodeMask = heapProps.CreationNodeMask;
+				for (uint32_t i = 0; i < pBuffer->mDesc.mSharedNodeIndexCount; ++i)
+					heapProps.VisibleNodeMask |= (1 << pBuffer->mDesc.pSharedNodeIndices[i]);
+
 				res = allocator->m_hDevice->CreateCommittedResource(
-					&gHeapProperties[pBuffer->pDxAllocation->GetMemoryTypeIndex()].mProps, D3D12_HEAP_FLAG_NONE,
+					&heapProps, D3D12_HEAP_FLAG_NONE,
 					pCreateInfo->pDesc, pCreateInfo->mStartState, NULL,
 					IID_ARGS(&pBuffer->pDxResource));
 			}
-			pBuffer->pDxResource->SetName(L"OWN BUFFER RESOURCE");
+			pBuffer->pDxResource->SetName(pCreateInfo->pDebugName ? pCreateInfo->pDebugName : L"OWN BUFFER RESOURCE");
 
 			if (pMemoryRequirements->flags & RESOURCE_MEMORY_REQUIREMENT_PERSISTENT_MAP_BIT &&
 				pMemoryRequirements->usage != RESOURCE_MEMORY_USAGE_GPU_ONLY)
@@ -593,7 +601,7 @@ long createBuffer(
 	return res;
 }
 
-void destroyBuffer(
+void d3d12_destroyBuffer(
 	ResourceAllocator* allocator,
 	Buffer* pBuffer)
 {
@@ -611,7 +619,7 @@ void destroyBuffer(
 	}
 }
 
-long createTexture(
+long d3d12_createTexture(
 	ResourceAllocator* allocator,
 	const TextureCreateInfo* pCreateInfo,
 	const AllocatorMemoryRequirements* pMemoryRequirements,
@@ -633,7 +641,7 @@ long createTexture(
 	{
 		if (pTexture->pDxAllocation->GetType() == ResourceAllocation::ALLOCATION_TYPE_BLOCK)
 		{
-			if (fnHookSpecialTextureAllocation != NULL && fnHookSpecialTextureAllocation(pTexture, pCreateInfo, allocator))
+			if (fnHookSpecialTextureAllocation != NULL && fnHookSpecialTextureAllocation(allocator->pRenderer, pTexture, pCreateInfo, allocator))
 			{
 				LOGINFOF("Allocated memory in special platform-specific buffer");
 			}
@@ -643,7 +651,7 @@ long createTexture(
 					pTexture->pDxAllocation->GetMemory(), pTexture->pDxAllocation->GetOffset(),
 					pCreateInfo->pDesc, pCreateInfo->mStartState, pCreateInfo->pClearValue,
 					IID_ARGS(&pTexture->pDxResource));
-				pTexture->pDxResource->SetName(L"PLACED TEXTURE RESOURCE");
+				pTexture->pDxResource->SetName(pCreateInfo->pDebugName? pCreateInfo->pDebugName : L"PLACED TEXTURE RESOURCE");
 			}
 		}
 		else
@@ -654,14 +662,18 @@ long createTexture(
 			else if (pMemoryRequirements->flags & RESOURCE_MEMORY_REQUIREMENT_SHARED_BIT)
 				heapFlags |= D3D12_HEAP_FLAG_SHARED;
 
-			D3D12_HEAP_PROPERTIES props = gHeapProperties[pTexture->pDxAllocation->GetMemoryTypeIndex()].mProps;
+			D3D12_HEAP_PROPERTIES heapProps = gHeapProperties[pTexture->pDxAllocation->GetMemoryTypeIndex()].mProps;
+			heapProps.CreationNodeMask = (1 << pCreateInfo->pTextureDesc->mNodeIndex);
+			heapProps.VisibleNodeMask = heapProps.CreationNodeMask;
+			for (uint32_t i = 0; i < pCreateInfo->pTextureDesc->mSharedNodeIndexCount; ++i)
+				heapProps.VisibleNodeMask |= (1 << pCreateInfo->pTextureDesc->pSharedNodeIndices[i]);
 
 			res = allocator->m_hDevice->CreateCommittedResource(
-				&props, heapFlags,
+				&heapProps, heapFlags,
 				pCreateInfo->pDesc, pCreateInfo->mStartState, pCreateInfo->pClearValue,
 				IID_ARGS(&pTexture->pDxResource));
 
-			pTexture->pDxResource->SetName(L"OWN TEXTURE RESOURCE");
+			pTexture->pDxResource->SetName(pCreateInfo->pDebugName ? pCreateInfo->pDebugName : L"OWN TEXTURE RESOURCE");
 		}
 
 		if (SUCCEEDED(res))
@@ -1781,16 +1793,15 @@ HRESULT ResourceAllocator::AllocateMemoryOfType(
 				desc.SampleDesc = { 1, 0 };
 				desc.DepthOrArraySize = 1;
 
-				const D3D12_HEAP_PROPERTIES* pHeapProps = &gHeapProperties[memTypeIndex].mProps;
-
+				D3D12_HEAP_PROPERTIES heapProps = gHeapProperties[memTypeIndex].mProps;
 				D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COMMON;
-				if (pHeapProps->Type == D3D12_HEAP_TYPE_UPLOAD)
+				if (heapProps.Type == D3D12_HEAP_TYPE_UPLOAD)
 					state = D3D12_RESOURCE_STATE_GENERIC_READ;
-				else if (pHeapProps->Type == D3D12_HEAP_TYPE_READBACK)
+				else if (heapProps.Type == D3D12_HEAP_TYPE_READBACK)
 					state = D3D12_RESOURCE_STATE_COPY_DEST;
 
 				ID3D12Resource* mem = NULL;
-				res = m_hDevice->CreateCommittedResource(pHeapProps, D3D12_HEAP_FLAG_NONE, &desc, state, NULL, IID_ARGS(&mem));
+				res = m_hDevice->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &desc, state, NULL, IID_ARGS(&mem));
 				mem->SetName(L"BLOCK RESOURCE");
 
 				if (!SUCCEEDED(res))

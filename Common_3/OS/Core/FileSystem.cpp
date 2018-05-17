@@ -23,7 +23,6 @@
 */
 
 #include "../Interfaces/IFileSystem.h"
-#include "../Math/FloatUtil.h"
 #include "../Interfaces/ILogManager.h"
 #include "../Interfaces/IMemoryManager.h"
 
@@ -37,6 +36,13 @@
 #include  <io.h>
 #include  <stdio.h>
 #include  <stdlib.h>
+#endif
+#ifdef __linux__
+#include <unistd.h>
+#include <limits.h>  // for UINT_MAX
+#include <sys/stat.h>  // for mkdir
+#include <sys/errno.h> // for errno
+#include <sys/wait.h>
 #endif
 
 static const char* pszFileAccessFlags[] =
@@ -198,7 +204,7 @@ String Deserializer::ReadFileID()
 {
 	String ret;
 	ret.resize(4);
-	Read(&ret[0U], 4);
+	Read(ret.begin(), 4);
 	return ret;
 }
 
@@ -337,10 +343,10 @@ bool Serializer::WriteString(const String& value)
 bool Serializer::WriteFileID(const String& value)
 {
 	bool success = true;
-	unsigned length = (unsigned)min((int)value.getLength(), 4);
+	unsigned length = (unsigned)min((int)(uint32_t)value.size(), 4);
 
 	success &= Write(value.c_str(), length) == length;
-	for (unsigned i = value.getLength(); i < 4; ++i)
+	for (unsigned i = (uint32_t)value.size(); i < 4; ++i)
 		success &= WriteByte(' ');
 	return success;
 }
@@ -348,7 +354,7 @@ bool Serializer::WriteFileID(const String& value)
 bool Serializer::WriteLine(const String& value)
 {
 	bool success = true;
-	success &= Write(value.c_str(), value.getLength()) == value.getLength();
+	success &= Write(value.c_str(), (uint32_t)value.size()) == (uint32_t)value.size();
 	// Only write '\n'; if we are writing to a text file it should be opened in text mode.
 	// Platforms other than Windows won't interpret the '\r' correctly if we add it here.
 	success &= WriteUByte(10);
@@ -373,7 +379,7 @@ bool File::Open(const String& _fileName, FileMode mode, FSRoot root)
 
 	Close();
 
-	if (fileName.isEmpty())
+	if (fileName.size() == 0)
 	{
 		LOGERRORF("Could not open file with empty name");
 		return false;
@@ -452,7 +458,7 @@ unsigned File::Read(void* dest, unsigned size)
 		mReadSyncNeeded = false;
 	}
 
-	_readFile(dest, size, pHandle);
+	size = (unsigned int)_readFile(dest, size, pHandle);
 	mWriteSyncNeeded = true;
 	mPosition += size;
 	return size;
@@ -514,6 +520,9 @@ unsigned File::Write(const void* data, unsigned size)
 		mWriteSyncNeeded = false;
 	}
 
+	// fwrite returns how many bytes were written.
+	// which should be the same as size.
+	// If not, then it's a write error.
 	if (_writeFile(data, size, pHandle) != 1)
 	{
 		// Return to the position where the write began
@@ -704,12 +713,18 @@ String FileSystem::FixPath(const String& pszFileName, FSRoot root)
 	if (root == FSR_Absolute)
 		return pszFileName;
 
+#ifdef TARGET_IOS
+	//on iOS all assets are stored in the root of the app bundle.
+	//so getting any resource will be at the root.
+	return pszFileName;
+#endif
+	
 	ASSERT(root < FSR_Count);
 	String res;
 	if (pszFileName[1U] != ':' && pszFileName[0U] != '/') //Quick hack to ignore root changes when a absolute path is given in windows or GNU
 	{
 		// was the path modified? if so use that, otherwise use static array
-		if (!mModifiedRootPaths[root].isEmpty())
+		if (mModifiedRootPaths[root].size() != 0)
 			res = mModifiedRootPaths[root] + pszFileName;
 		else
 			res = String(pszRoots[root]) + pszFileName;
@@ -816,7 +831,7 @@ String FileSystem::AddTrailingSlash(const String& pathName)
 {
 	String ret = pathName.trimmed();
 	ret.replace('\\', '/');
-	if (!ret.isEmpty() && ret.at(ret.getLength() - 1) != '/')
+	if (ret.size() != 0 && ret.at((uint32_t)ret.size() - 1) != '/')
 		ret.push_back('/');
 	return ret;
 }
@@ -825,8 +840,8 @@ String FileSystem::RemoveTrailingSlash(const String& pathName)
 {
 	String ret = pathName.trimmed();
 	ret.replace('\\', '/');
-	if (!ret.isEmpty() && ret.at(ret.getLength() - 1) == '/')
-		ret.resize(ret.getLength() - 1);
+	if (ret.size() != 0 && ret.at((uint32_t)ret.size() - 1) == '/')
+		ret.resize((uint32_t)ret.size() - 1);
 	return ret;
 }
 
@@ -882,7 +897,7 @@ bool FileSystem::CreateDir(const String& pathName)
 {
 	// Create each of the parents if necessary
 	String parentPath = GetParentPath(pathName);
-	if (parentPath.getLength() > 1 && !DirExists(parentPath))
+	if ((uint32_t)parentPath.size() > 1 && !DirExists(parentPath))
 	{
 		if (!CreateDir(parentPath))
 			return false;
@@ -914,7 +929,7 @@ int FileSystem::SystemRun(const String& fileName, const tinystl::vector<String>&
 
 #elif defined(_WIN32)
 	// Add .exe extension if no extension defined
-	if (GetExtension(fixedFileName).isEmpty())
+	if (GetExtension(fixedFileName).size() == 0)
 		fixedFileName += ".exe";
 
 	String commandLine = "\"" + fixedFileName + "\"";
@@ -963,6 +978,18 @@ int FileSystem::SystemRun(const String& fileName, const tinystl::vector<String>&
 	}
 
 	return exitCode;
+#elif defined(__linux__)
+		tinystl::vector<const char*> argPtrs; 
+		String cmd(fixedFileName.c_str());
+		char* space = " ";
+		cmd.append(space, space+1);
+		for (unsigned i = 0; i < (unsigned)arguments.size(); ++i)
+		{
+			cmd.append(arguments[i].begin(), arguments[i].end());
+		}
+		
+		int res = system(cmd.c_str());
+		return res;
 #else
 	pid_t pid = fork();
 	if (!pid)

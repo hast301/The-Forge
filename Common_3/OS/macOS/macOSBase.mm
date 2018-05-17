@@ -533,6 +533,10 @@ int macOSMain(int argc, const char** argv, IApp* app)
 // Timer used in the update function.
 Timer deltaTimer;
 IApp::Settings* pSettings;
+#ifdef AUTOMATED_TESTING
+uint32_t testingCurrentFrameCount;
+uint32_t testingMaxFrameCount = 120;
+#endif
 
 // Metal application implementation.
 @implementation MetalKitApplication{}
@@ -568,6 +572,7 @@ IApp::Settings* pSettings;
 
 		@autoreleasepool {
 			pApp->Init();
+			pApp->Load();
 		}
 	}
 
@@ -592,6 +597,18 @@ IApp::Settings* pSettings;
 
 	pApp->Update(deltaTime);
 	pApp->Draw();
+    
+#ifdef AUTOMATED_TESTING
+        testingCurrentFrameCount++;
+        if(testingCurrentFrameCount >= testingMaxFrameCount)
+        {
+            for (NSWindow *window in [NSApplication sharedApplication].windows) {
+                [window close];
+            }
+            
+            [NSApp terminate:nil];
+        }
+#endif
 }
 @end
 /************************************************************************/

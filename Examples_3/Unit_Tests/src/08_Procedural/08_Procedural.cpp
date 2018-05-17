@@ -23,24 +23,25 @@
 */
 
 //tiny stl
-#include "../../Common_3/ThirdParty/OpenSource/TinySTL/vector.h"
-#include "../../Common_3/ThirdParty/OpenSource/TinySTL/string.h"
+#include "../../../../Common_3/ThirdParty/OpenSource/TinySTL/vector.h"
+#include "../../../../Common_3/ThirdParty/OpenSource/TinySTL/string.h"
 
 //Interfaces
-#include "../../Common_3/OS/Interfaces/ICameraController.h"
-#include "../../Common_3/OS/Interfaces/ILogManager.h"
-#include "../../Common_3/OS/Interfaces/IFileSystem.h"
-#include "../../Common_3/OS/Interfaces/ITimeManager.h"
-#include "../../Common_3/OS/Interfaces/IUIManager.h"
-#include "../../Common_3/OS/Interfaces/IApp.h"
-#include "../../Common_3/Renderer/IRenderer.h"
-#include "../../Common_3/Renderer/ResourceLoader.h"
-#include "../../Common_3/Renderer/GpuProfiler.h"
+#include "../../../../Common_3/OS/Interfaces/ICameraController.h"
+#include "../../../../Common_3/OS/Interfaces/ILogManager.h"
+#include "../../../../Common_3/OS/Interfaces/IFileSystem.h"
+#include "../../../../Common_3/OS/Interfaces/ITimeManager.h"
+#include "../../../../Middleware_3/UI/AppUI.h"
+#include "../../../../Common_3/OS/Core/DebugRenderer.h"
+#include "../../../../Common_3/OS/Interfaces/IApp.h"
+#include "../../../../Common_3/Renderer/IRenderer.h"
+#include "../../../../Common_3/Renderer/ResourceLoader.h"
+#include "../../../../Common_3/Renderer/GpuProfiler.h"
 
 //Math
-#include "../../Common_3/OS/Math/MathTypes.h"
+#include "../../../../Common_3/OS/Math/MathTypes.h"
 
-#include "../../Common_3/OS/Interfaces/IMemoryManager.h"
+#include "../../../../Common_3/OS/Interfaces/IMemoryManager.h"
 
 
 /// Camera Controller
@@ -53,14 +54,31 @@
 #if defined(DIRECT3D12)
 #define RESOURCE_DIR "PCDX12"
 #elif defined(VULKAN)
-#define RESOURCE_DIR "PCVulkan"
+	#if defined(_WIN32)
+	#define RESOURCE_DIR "PCVulkan"
+	#elif defined(LINUX)
+	#define RESOURCE_DIR "LINUXVulkan"
+	#endif
 #elif defined(METAL)
 #define RESOURCE_DIR "OSXMetal"
 #else
 #error PLATFORM NOT SUPPORTED
 #endif
 
-
+#ifdef _DURANGO
+// Durango load assets from 'Layout\Image\Loose'
+const char* pszRoots[] =
+{
+	"Shaders/Binary/",									// FSR_BinShaders
+	"Shaders/",											// FSR_SrcShaders
+	"Shaders/Binary/",									// FSR_BinShaders_Common
+	"Shaders/",											// FSR_SrcShaders_Common
+	"Textures/",										// FSR_Textures
+	"Meshes/",											// FSR_Meshes
+	"Fonts/",											// FSR_Builtin_Fonts
+	"",													// FSR_OtherFiles
+};
+#else
 //Example for using roots or will cause linker error with the extern root in FileSystem.cpp
 const char* pszRoots[] =
 {
@@ -73,6 +91,7 @@ const char* pszRoots[] =
 	"../../../UnitTestResources/Fonts/",					// FSR_Builtin_Fonts
 	"",														// FSR_OtherFiles
 };
+#endif
 
 LogManager gLogManager;
 
@@ -135,8 +154,8 @@ Texture*                    pVirtualJoystickTex = nullptr;
 
 Renderer*					pRenderer = nullptr;
 
-Gui*						pGuiWindow = nullptr;
-UIManager*					pUIManager = nullptr;
+UIApp						gAppUI;
+GuiComponent*				pGui;
 
 Queue*						pGraphicsQueue = nullptr;
 CmdPool*					pCmdPool = nullptr;
@@ -218,16 +237,18 @@ Buffer*						pScreenSizeBuffer;
 #if !USE_CAMERACONTROLLER
 struct CameraProperty
 {
-	Point3              mCameraPosition;
-	vec3                mCameraRight;
-	vec3                mCameraDirection;
-	vec3                mCameraUp;
-	vec3                mCameraForward;
-	float               mCameraPitch;
-	float               mCamearYaw;
+	Point3					mCameraPosition;
+	vec3					mCameraRight;
+	vec3					mCameraDirection;
+	vec3					mCameraUp;
+	vec3					mCameraForward;
+	float					mCameraPitch;
+	float					mCamearYaw;
 } gCameraProp;
 #endif
-float               gCameraYRotateScale;   // decide how fast camera rotate 
+float					gCameraYRotateScale;   // decide how fast camera rotate 
+
+DebugTextDrawDesc gFrameTimeDraw = DebugTextDrawDesc(0, 0xff00ffff, 18);
 
 class Procedural : public IApp
 {
@@ -254,12 +275,10 @@ public:
 		addSemaphore(pRenderer, &pImageAcquiredSemaphore);
 
 		initResourceLoaderInterface(pRenderer, DEFAULT_MEMORY_BUDGET, false);
+		initDebugRendererInterface(pRenderer, FileSystem::FixPath("TitilliumText/TitilliumText-Bold.ttf", FSR_Builtin_Fonts));
 #ifndef METAL
 		addGpuProfiler(pRenderer, pGraphicsQueue, &pGpuProfiler);
 #endif
-
-		if (!Load())
-			return false;
 
 		TextureLoadDesc textureDesc = {};
 #ifndef TARGET_IOS
@@ -287,24 +306,38 @@ public:
 		proceduralPlanet.mStages[1] = { "proceduralPlanet.frag", NULL, 0, FSR_SrcShaders };
 
 		ShaderLoadDesc bgStars = {};
-		bgStars.mStages[0] = { "background.vert", NULL, 0, FSR_SrcShaders };
-		bgStars.mStages[1] = { "background.frag", NULL, 0, FSR_SrcShaders };
+		bgStars.mStages[0] = { "backGround.vert", NULL, 0, FSR_SrcShaders };
+		bgStars.mStages[1] = { "backGround.frag", NULL, 0, FSR_SrcShaders };
 
-		addSampler(pRenderer, &pSamplerEnv, FILTER_LINEAR, FILTER_LINEAR, MIPMAP_MODE_LINEAR,
-			ADDRESS_MODE_REPEAT, ADDRESS_MODE_REPEAT, ADDRESS_MODE_REPEAT);
+		SamplerDesc samplerDesc = {
+			FILTER_LINEAR, FILTER_LINEAR, MIPMAP_MODE_LINEAR,
+			ADDRESS_MODE_REPEAT, ADDRESS_MODE_REPEAT, ADDRESS_MODE_REPEAT
+		};
+		addSampler(pRenderer, &samplerDesc, &pSamplerEnv);
 
 		addShader(pRenderer, &bgStars, &pShaderBG);
 		addShader(pRenderer, &proceduralPlanet, &pShaderBRDF);
 
-		RootSignatureDesc rootDesc = {};
-		rootDesc.mStaticSamplers["uSampler0"] = pSamplerEnv;
+		const char* pStaticSamplerName[] = { "uSampler0" };
+		RootSignatureDesc bgRootDesc = { &pShaderBG, 1 };
+		RootSignatureDesc brdfRootDesc = { &pShaderBRDF, 1 };
+		brdfRootDesc.mStaticSamplerCount = 1;
+		brdfRootDesc.ppStaticSamplerNames = pStaticSamplerName;
+		brdfRootDesc.ppStaticSamplers = &pSamplerEnv;
 
-		addRootSignature(pRenderer, 1, &pShaderBG, &pRootSigBG);
-		addRootSignature(pRenderer, 1, &pShaderBRDF, &pRootSigBRDF, &rootDesc);
+		addRootSignature(pRenderer, &bgRootDesc, &pRootSigBG);
+		addRootSignature(pRenderer, &brdfRootDesc, &pRootSigBRDF);
 
 		// Create depth state and rasterizer state
-		addRasterizerState(&pRasterstateDefault, CULL_MODE_FRONT);
-		addDepthState(pRenderer, &pDepth, true, true);
+		RasterizerStateDesc rasterizerStateDesc = {};
+		rasterizerStateDesc.mCullMode = CULL_MODE_FRONT;
+		addRasterizerState(pRenderer, &rasterizerStateDesc, &pRasterstateDefault);
+
+		DepthStateDesc depthStateDesc = {};
+		depthStateDesc.mDepthTest = true;
+		depthStateDesc.mDepthWrite = true;
+		depthStateDesc.mDepthFunc = CMP_LEQUAL;
+		addDepthState(pRenderer, &depthStateDesc, &pDepth);
 
 		float* pSPherePoints;
 		generateSpherePoints(&pSPherePoints, &gNumOfSpherePoints, gSphereResolution);
@@ -332,62 +365,6 @@ public:
 		bgVbDesc.pData = bgVertex;
 		bgVbDesc.ppBuffer = &pBGVertexBuffer;
 		addResource(&bgVbDesc);
-
-		// Create vertex layout
-		VertexLayout vertexLayoutSphere = {};
-		vertexLayoutSphere.mAttribCount = 2;
-
-		vertexLayoutSphere.mAttribs[0].mSemantic = SEMANTIC_POSITION;
-		vertexLayoutSphere.mAttribs[0].mFormat = ImageFormat::RGB32F;
-		vertexLayoutSphere.mAttribs[0].mBinding = 0;
-		vertexLayoutSphere.mAttribs[0].mLocation = 0;
-		vertexLayoutSphere.mAttribs[0].mOffset = 0;
-
-		vertexLayoutSphere.mAttribs[1].mSemantic = SEMANTIC_NORMAL;
-		vertexLayoutSphere.mAttribs[1].mFormat = ImageFormat::RGB32F;
-		vertexLayoutSphere.mAttribs[1].mBinding = 0;
-		vertexLayoutSphere.mAttribs[1].mLocation = 1;
-		vertexLayoutSphere.mAttribs[1].mOffset = 3 * sizeof(float); // first attribute contains 3 floats
-
-		GraphicsPipelineDesc pipelineSettings = { 0 };
-		pipelineSettings.mPrimitiveTopo = PRIMITIVE_TOPO_TRI_LIST;
-		pipelineSettings.mRenderTargetCount = 1;
-		pipelineSettings.pDepthState = pDepth;
-		pipelineSettings.pDepthStencil = pDepthBuffer;
-		pipelineSettings.ppRenderTargets = &pSwapChain->ppSwapchainRenderTargets[0];
-		pipelineSettings.pRootSignature = pRootSigBRDF;
-		pipelineSettings.pShaderProgram = pShaderBRDF;
-		pipelineSettings.pVertexLayout = &vertexLayoutSphere;
-		pipelineSettings.pRasterizerState = pRasterstateDefault;
-		addPipeline(pRenderer, &pipelineSettings, &pPipelineBRDF);
-
-		// Create vertex layout
-		VertexLayout vertexLayoutBG = {};
-		vertexLayoutBG.mAttribCount = 2;
-
-		vertexLayoutBG.mAttribs[0].mSemantic = SEMANTIC_POSITION;
-		vertexLayoutBG.mAttribs[0].mFormat = ImageFormat::RGB32F;
-		vertexLayoutBG.mAttribs[0].mBinding = 0;
-		vertexLayoutBG.mAttribs[0].mLocation = 0;
-		vertexLayoutBG.mAttribs[0].mOffset = 0;
-
-		vertexLayoutBG.mAttribs[1].mSemantic = SEMANTIC_NORMAL;
-		vertexLayoutBG.mAttribs[1].mFormat = ImageFormat::RGB32F;
-		vertexLayoutBG.mAttribs[1].mBinding = 0;
-		vertexLayoutBG.mAttribs[1].mLocation = 1;
-		vertexLayoutBG.mAttribs[1].mOffset = 3 * sizeof(float); // first attribute contains 3 floats
-
-		GraphicsPipelineDesc pipelineSettingsBG = { 0 };
-		pipelineSettingsBG.mPrimitiveTopo = PRIMITIVE_TOPO_TRI_LIST;
-		pipelineSettingsBG.mRenderTargetCount = 1;
-		pipelineSettingsBG.pDepthState = pDepth;
-		pipelineSettingsBG.pDepthStencil = pDepthBuffer;
-		pipelineSettingsBG.ppRenderTargets = &pSwapChain->ppSwapchainRenderTargets[0];
-		pipelineSettingsBG.pRootSignature = pRootSigBG;
-		pipelineSettingsBG.pShaderProgram = pShaderBG;
-		pipelineSettingsBG.pVertexLayout = &vertexLayoutBG;
-		pipelineSettingsBG.pRasterizerState = pRasterstateDefault;
-		addPipeline(pRenderer, &pipelineSettingsBG, &pPipelineBG);
 
 		// Create a screenSize uniform buffer
 
@@ -474,14 +451,15 @@ public:
 		gUniformDataLights.mCurrAmountOfLights = 1;
 
 		// Create UI
-		UISettings uiSettings = {};
-		uiSettings.pDefaultFontName = "TitilliumText/TitilliumText-Bold.ttf";
-		addUIManagerInterface(pRenderer, &uiSettings, &pUIManager);
+		if (!gAppUI.Init(pRenderer))
+			return false;
+
+		gAppUI.LoadFont(FileSystem::FixPath("TitilliumText/TitilliumText-Bold.ttf", FSR_Builtin_Fonts));
 
 		GuiDesc guiDesc = {};
 		guiDesc.mStartSize = vec2(300.0f, 360.0f);
 		guiDesc.mStartPosition = vec2(300.0f, guiDesc.mStartSize.getY());
-		addGui(pUIManager, &guiDesc, &pGuiWindow);
+		pGui = gAppUI.AddGuiComponent(GetName(), &guiDesc);
 
 		UIProperty sunX = UIProperty("Sunlight X", gSunDirX, -1.0f, 1.0f, 0.01f);
 		UIProperty sunY = UIProperty("Sunlight Y", gSunDirY, -1.0f, 1.0f, 0.01f);
@@ -494,17 +472,16 @@ public:
 		UIProperty TerrainExp = UIProperty("Terrain Exp : ", gTerrainExp, 0.0f, 1.0f, 0.01f);
 		UIProperty TerrainSeed = UIProperty("Terrain Seed : ", gTerrainSeed, 0.0f, 100.0f, 1.0f);
 
-		addProperty(pGuiWindow, &sunX);
-		addProperty(pGuiWindow, &sunY);
-		addProperty(pGuiWindow, &sunZ);
+		pGui->AddProperty(sunX);
+		pGui->AddProperty(sunY);
+		pGui->AddProperty(sunZ);
 
-		addProperty(pGuiWindow, &OceanHeight);
-		addProperty(pGuiWindow, &ShoreHeight);
-		addProperty(pGuiWindow, &SnowHeight);
-		addProperty(pGuiWindow, &PolarCapsAttitude);
-		addProperty(pGuiWindow, &TerrainExp);
-		addProperty(pGuiWindow, &TerrainSeed);
-
+		pGui->AddProperty(OceanHeight);
+		pGui->AddProperty(ShoreHeight);
+		pGui->AddProperty(SnowHeight);
+		pGui->AddProperty(PolarCapsAttitude);
+		pGui->AddProperty(TerrainExp);
+		pGui->AddProperty(TerrainSeed);
 
 #if USE_CAMERACONTROLLER
 		CameraMotionParameters camParameters{ 10.0f, 600.0f, 200.0f };
@@ -520,18 +497,16 @@ public:
 
 		pCameraController->setMotionParameters(camParameters);
 
+#if !defined(_DURANGO)
 		registerRawMouseMoveEvent(cameraMouseMove);
 		registerMouseButtonEvent(cameraMouseButton);
 		registerMouseWheelEvent(cameraMouseWheel);
-        
+#endif
+
 #ifdef TARGET_IOS
         registerTouchEvent(cameraTouch);
         registerTouchMoveEvent(cameraTouchMove);
 #endif
-#endif
-
-#if defined(VULKAN)
-		transitionRenderTargets();
 #endif
 
 		return true;
@@ -539,12 +514,13 @@ public:
 
 	void Exit()
 	{
-		waitForFences(pGraphicsQueue, 1, &pRenderCompleteFences[gFrameIndex]);
+		waitForFences(pGraphicsQueue, 1, &pRenderCompleteFences[gFrameIndex], true);
 
 #if USE_CAMERACONTROLLER
 		destroyCameraController(pCameraController);
 #endif
 
+		removeDebugRendererInterface();
 		removeResource(pSphereVertexBuffer);
 		removeResource(pBGVertexBuffer);
 		for (uint32_t frameIdx = 0; frameIdx < gImageCount; ++frameIdx)
@@ -564,8 +540,7 @@ public:
         removeResource(pVirtualJoystickTex);
 #endif
 
-		removeGui(pUIManager, pGuiWindow);
-		removeUIManagerInterface(pRenderer, pUIManager);
+		gAppUI.Exit();
 
 		for (uint32_t i = 0; i < gImageCount; ++i)
 		{
@@ -584,16 +559,12 @@ public:
 		removeDepthState(pDepth);
 		removeResource(pEnvTex);
 
-		removeRenderTarget(pRenderer, pDepthBuffer);
 		removeRasterizerState(pRasterstateDefault);
 
 		removeSampler(pRenderer, pSamplerEnv);
 
 		removeShader(pRenderer, pShaderBRDF);
 		removeShader(pRenderer, pShaderBG);
-
-		removePipeline(pRenderer, pPipelineBRDF);
-		removePipeline(pRenderer, pPipelineBG);
 
 		removeRootSignature(pRenderer, pRootSigBRDF);
 		removeRootSignature(pRenderer, pRootSigBG);
@@ -605,7 +576,6 @@ public:
 		// Remove resource loader and renderer
 		removeResourceLoaderInterface(pRenderer);
 
-		removeSwapChain(pRenderer, pSwapChain);
 		removeQueue(pGraphicsQueue);
 
 		removeRenderer(pRenderer);
@@ -613,39 +583,93 @@ public:
 
 	bool Load()
 	{
-		SwapChainDesc swapChainDesc = {};
-		swapChainDesc.pWindow = pWindow;
-		swapChainDesc.pQueue = pGraphicsQueue;
-		swapChainDesc.mWidth = mSettings.mWidth;
-		swapChainDesc.mHeight = mSettings.mHeight;
-		swapChainDesc.mImageCount = gImageCount;
-		swapChainDesc.mSampleCount = SAMPLE_COUNT_1;
-		swapChainDesc.mColorFormat = getRecommendedSwapchainFormat(true);
-		swapChainDesc.mEnableVsync = false;
-		addSwapChain(pRenderer, &swapChainDesc, &pSwapChain);
+		if (!addSwapChain())
+			return false;
 
-		// Add depth buffer
-		RenderTargetDesc depthRT = {};
-		depthRT.mArraySize = 1;
-		depthRT.mClearValue = { 1.0f, 0 };
-		depthRT.mDepth = 1;
-		depthRT.mFormat = ImageFormat::D32F;
-		depthRT.mHeight = mSettings.mHeight;
-		depthRT.mSampleCount = SAMPLE_COUNT_1;
-		depthRT.mSampleQuality = 0;
-		depthRT.mType = RENDER_TARGET_TYPE_2D;
-		depthRT.mUsage = RENDER_TARGET_USAGE_DEPTH_STENCIL;
-		depthRT.mWidth = mSettings.mWidth;
-#ifdef TARGET_IOS
-		depthRT.mFlags = TEXTURE_CREATION_FLAG_ON_TILE;
+		if (!addDepthBuffer())
+			return false;
+
+		if (!gAppUI.Load(pSwapChain->ppSwapchainRenderTargets))
+			return false;
+
+		// Create vertex layout
+		VertexLayout vertexLayoutSphere = {};
+		vertexLayoutSphere.mAttribCount = 2;
+
+		vertexLayoutSphere.mAttribs[0].mSemantic = SEMANTIC_POSITION;
+		vertexLayoutSphere.mAttribs[0].mFormat = ImageFormat::RGB32F;
+		vertexLayoutSphere.mAttribs[0].mBinding = 0;
+		vertexLayoutSphere.mAttribs[0].mLocation = 0;
+		vertexLayoutSphere.mAttribs[0].mOffset = 0;
+
+		vertexLayoutSphere.mAttribs[1].mSemantic = SEMANTIC_NORMAL;
+		vertexLayoutSphere.mAttribs[1].mFormat = ImageFormat::RGB32F;
+		vertexLayoutSphere.mAttribs[1].mBinding = 0;
+		vertexLayoutSphere.mAttribs[1].mLocation = 1;
+		vertexLayoutSphere.mAttribs[1].mOffset = 3 * sizeof(float); // first attribute contains 3 floats
+
+		GraphicsPipelineDesc pipelineSettings = { 0 };
+		pipelineSettings.mPrimitiveTopo = PRIMITIVE_TOPO_TRI_LIST;
+		pipelineSettings.mRenderTargetCount = 1;
+		pipelineSettings.pDepthState = pDepth;
+		pipelineSettings.pColorFormats = &pSwapChain->ppSwapchainRenderTargets[0]->mDesc.mFormat;
+		pipelineSettings.pSrgbValues = &pSwapChain->ppSwapchainRenderTargets[0]->mDesc.mSrgb;
+		pipelineSettings.mSampleCount = pSwapChain->ppSwapchainRenderTargets[0]->mDesc.mSampleCount;
+		pipelineSettings.mSampleQuality = pSwapChain->ppSwapchainRenderTargets[0]->mDesc.mSampleQuality;
+		pipelineSettings.mDepthStencilFormat = pDepthBuffer->mDesc.mFormat;
+		pipelineSettings.pRootSignature = pRootSigBRDF;
+		pipelineSettings.pShaderProgram = pShaderBRDF;
+		pipelineSettings.pVertexLayout = &vertexLayoutSphere;
+		pipelineSettings.pRasterizerState = pRasterstateDefault;
+		addPipeline(pRenderer, &pipelineSettings, &pPipelineBRDF);
+
+		// Create vertex layout
+		VertexLayout vertexLayoutBG = {};
+		vertexLayoutBG.mAttribCount = 2;
+
+		vertexLayoutBG.mAttribs[0].mSemantic = SEMANTIC_POSITION;
+		vertexLayoutBG.mAttribs[0].mFormat = ImageFormat::RGB32F;
+		vertexLayoutBG.mAttribs[0].mBinding = 0;
+		vertexLayoutBG.mAttribs[0].mLocation = 0;
+		vertexLayoutBG.mAttribs[0].mOffset = 0;
+
+		vertexLayoutBG.mAttribs[1].mSemantic = SEMANTIC_NORMAL;
+		vertexLayoutBG.mAttribs[1].mFormat = ImageFormat::RGB32F;
+		vertexLayoutBG.mAttribs[1].mBinding = 0;
+		vertexLayoutBG.mAttribs[1].mLocation = 1;
+		vertexLayoutBG.mAttribs[1].mOffset = 3 * sizeof(float); // first attribute contains 3 floats
+
+		GraphicsPipelineDesc pipelineSettingsBG = { 0 };
+		pipelineSettingsBG.mPrimitiveTopo = PRIMITIVE_TOPO_TRI_LIST;
+		pipelineSettingsBG.mRenderTargetCount = 1;
+		pipelineSettingsBG.pDepthState = pDepth;
+		pipelineSettingsBG.pColorFormats = &pSwapChain->ppSwapchainRenderTargets[0]->mDesc.mFormat;
+		pipelineSettingsBG.pSrgbValues = &pSwapChain->ppSwapchainRenderTargets[0]->mDesc.mSrgb;
+		pipelineSettingsBG.mSampleCount = pSwapChain->ppSwapchainRenderTargets[0]->mDesc.mSampleCount;
+		pipelineSettingsBG.mSampleQuality = pSwapChain->ppSwapchainRenderTargets[0]->mDesc.mSampleQuality;
+		pipelineSettingsBG.mDepthStencilFormat = pDepthBuffer->mDesc.mFormat;
+		pipelineSettingsBG.pRootSignature = pRootSigBG;
+		pipelineSettingsBG.pShaderProgram = pShaderBG;
+		pipelineSettingsBG.pVertexLayout = &vertexLayoutBG;
+		pipelineSettingsBG.pRasterizerState = pRasterstateDefault;
+		addPipeline(pRenderer, &pipelineSettingsBG, &pPipelineBG);
+
+#if defined(VULKAN)
+		transitionRenderTargets();
 #endif
-		addRenderTarget(pRenderer, &depthRT, &pDepthBuffer);
+
 		return true;
 	}
 
 	void Unload()
 	{
-		waitForFences(pGraphicsQueue, 1, &pRenderCompleteFences[gFrameIndex]);
+		waitForFences(pGraphicsQueue, 1, &pRenderCompleteFences[gFrameIndex], true);
+
+		gAppUI.Unload();
+
+		removePipeline(pRenderer, pPipelineBRDF);
+		removePipeline(pRenderer, pPipelineBG);
+
 		removeRenderTarget(pRenderer, pDepthBuffer);
 		removeSwapChain(pRenderer, pSwapChain);
 	}
@@ -693,7 +717,7 @@ public:
 		// Update light buffer
 		gUniformDataLights.mLights[0].mPos = vec4(normalize(vec3(gSunDirX, gSunDirY, gSunDirZ))* 1000.0f, 0.0);
 
-		updateGui(pUIManager, pGuiWindow, deltaTime);
+		gAppUI.Update(deltaTime);
 	}
 
 	void Draw()
@@ -738,7 +762,7 @@ public:
 		TextureBarrier barriers[] = { pRenderTarget->pTexture, RESOURCE_STATE_RENDER_TARGET };
 		cmdResourceBarrier(cmd, 0, NULL, 1, barriers, false);
 
-		cmdBeginRender(cmd, 1, &pRenderTarget, pDepthBuffer, &loadActions);
+		cmdBindRenderTargets(cmd, 1, &pRenderTarget, pDepthBuffer, &loadActions);
 		cmdSetViewport(cmd, 0.0f, 0.0f, (float)pRenderTarget->mDesc.mWidth, (float)pRenderTarget->mDesc.mHeight, 0.0f, 1.0f);
 		cmdSetScissor(cmd, 0, 0, pRenderTarget->mDesc.mWidth, pRenderTarget->mDesc.mHeight);
 		/************************************************************************/
@@ -790,7 +814,7 @@ public:
 		cmdBindVertexBuffer(cmd, 1, &pSphereVertexBuffer);
 
 		cmdDrawInstanced(cmd, gNumOfSpherePoints / 6, 0, 1);
-		cmdEndRender(cmd, 1, &pRenderTarget, pDepthBuffer);
+		cmdDrawInstanced(cmd, gNumOfSpherePoints / 6, 0, 1);
 
 #ifndef METAL
 		cmdEndGpuTimestampQuery(cmd, pGpuProfiler);
@@ -808,135 +832,108 @@ public:
 
 		// Prepare UI command buffers
 
-		cmdBeginRender(cmd, 1, &pRenderTarget, NULL);
+		cmdBindRenderTargets(cmd, 1, &pRenderTarget, NULL, NULL);
 		cmdSetViewport(cmd, 0.0f, 0.0f, (float)pRenderTarget->mDesc.mWidth, (float)pRenderTarget->mDesc.mHeight, 0.0f, 1.0f);
 		cmdSetScissor(cmd, 0, 0, pRenderTarget->mDesc.mWidth, pRenderTarget->mDesc.mHeight);
 
-		cmdUIBeginRender(cmd, pUIManager, 1, &pRenderTarget, NULL);
 		static HiresTimer gTimer;
+		gTimer.GetUSec(true);
         
 #ifdef TARGET_IOS
-        // Draw the camera controller's virtual joysticks.
-        float extSide = min(mSettings.mHeight, mSettings.mWidth) * pCameraController->getVirtualJoystickExternalRadius();
-        float intSide = min(mSettings.mHeight, mSettings.mWidth) * pCameraController->getVirtualJoystickInternalRadius();
-        
-        vec2 joystickSize = vec2(extSide);
-        vec2 leftJoystickCenter = pCameraController->getVirtualLeftJoystickCenter();
-        vec2 leftJoystickPos = vec2(leftJoystickCenter.getX() * mSettings.mWidth, leftJoystickCenter.getY() * mSettings.mHeight) - 0.5f * joystickSize;
-        cmdUIDrawTexturedQuad(cmd, pUIManager, leftJoystickPos, joystickSize, pVirtualJoystickTex);
-        vec2 rightJoystickCenter = pCameraController->getVirtualRightJoystickCenter();
-        vec2 rightJoystickPos = vec2(rightJoystickCenter.getX() * mSettings.mWidth, rightJoystickCenter.getY() * mSettings.mHeight) - 0.5f * joystickSize;
-        cmdUIDrawTexturedQuad(cmd, pUIManager, rightJoystickPos, joystickSize, pVirtualJoystickTex);
-        
-        joystickSize = vec2(intSide);
-        leftJoystickCenter = pCameraController->getVirtualLeftJoystickPos();
-        leftJoystickPos = vec2(leftJoystickCenter.getX() * mSettings.mWidth, leftJoystickCenter.getY() * mSettings.mHeight) - 0.5f * joystickSize;
-        cmdUIDrawTexturedQuad(cmd, pUIManager, leftJoystickPos, joystickSize, pVirtualJoystickTex);
-        rightJoystickCenter = pCameraController->getVirtualRightJoystickPos();
-        rightJoystickPos = vec2(rightJoystickCenter.getX() * mSettings.mWidth, rightJoystickCenter.getY() * mSettings.mHeight) - 0.5f * joystickSize;
-        cmdUIDrawTexturedQuad(cmd, pUIManager, rightJoystickPos, joystickSize, pVirtualJoystickTex);
+		// Draw the camera controller's virtual joysticks.
+		float extSide = min(mSettings.mHeight, mSettings.mWidth) * pCameraController->getVirtualJoystickExternalRadius();
+		float intSide = min(mSettings.mHeight, mSettings.mWidth) * pCameraController->getVirtualJoystickInternalRadius();
+
+		float2 joystickSize = float2(extSide);
+		vec2 leftJoystickCenter = pCameraController->getVirtualLeftJoystickCenter();
+		float2 leftJoystickPos = float2(leftJoystickCenter.getX() * mSettings.mWidth, leftJoystickCenter.getY() * mSettings.mHeight) - 0.5f * joystickSize;
+		drawDebugTexture(cmd, leftJoystickPos.x, leftJoystickPos.y, joystickSize.x, joystickSize.y, pVirtualJoystickTex, 1.0f, 1.0f, 1.0f);
+		vec2 rightJoystickCenter = pCameraController->getVirtualRightJoystickCenter();
+		float2 rightJoystickPos = float2(rightJoystickCenter.getX() * mSettings.mWidth, rightJoystickCenter.getY() * mSettings.mHeight) - 0.5f * joystickSize;
+		drawDebugTexture(cmd, rightJoystickPos.x, rightJoystickPos.y, joystickSize.x, joystickSize.y, pVirtualJoystickTex, 1.0f, 1.0f, 1.0f);
+
+		joystickSize = float2(intSide);
+		leftJoystickCenter = pCameraController->getVirtualLeftJoystickPos();
+		leftJoystickPos = float2(leftJoystickCenter.getX() * mSettings.mWidth, leftJoystickCenter.getY() * mSettings.mHeight) - 0.5f * joystickSize;
+		drawDebugTexture(cmd, leftJoystickPos.x, leftJoystickPos.y, joystickSize.x, joystickSize.y, pVirtualJoystickTex, 1.0f, 1.0f, 1.0f);
+		rightJoystickCenter = pCameraController->getVirtualRightJoystickPos();
+		rightJoystickPos = float2(rightJoystickCenter.getX() * mSettings.mWidth, rightJoystickCenter.getY() * mSettings.mHeight) - 0.5f * joystickSize;
+		drawDebugTexture(cmd, rightJoystickPos.x, rightJoystickPos.y, joystickSize.x, joystickSize.y, pVirtualJoystickTex, 1.0f, 1.0f, 1.0f);
 #endif
 
-		cmdUIDrawFrameTime(cmd, pUIManager, { 8, 15 }, "CPU ", gTimer.GetUSec(true) / 1000.0f);
+		drawDebugText(cmd, 8, 15, String::format("CPU %f ms", gTimer.GetUSecAverage() / 1000.0f), &gFrameTimeDraw);
+
 #ifndef METAL
-		cmdUIDrawFrameTime(cmd, pUIManager, { 8, 40 }, "GPU ", (float)pGpuProfiler->mCumulativeTime * 1000.0f);
-		cmdUIDrawGpuProfileData(cmd, pUIManager, { 8, 65 }, pGpuProfiler);
+		drawDebugText(cmd, 8, 40, String::format("GPU %f ms", (float)pGpuProfiler->mCumulativeTime * 1000.0f), &gFrameTimeDraw);
+		drawDebugGpuProfile(cmd, 8, 65, pGpuProfiler, NULL);
 #endif
 
 #ifndef TARGET_IOS
-		cmdUIDrawGUI(cmd, pUIManager, pGuiWindow);
+		gAppUI.Gui(pGui);
 #endif
 
-		cmdUIEndRender(cmd, pUIManager);
-		cmdEndRender(cmd, 1, &pRenderTarget, NULL);
+		gAppUI.Draw(cmd);
 
 		// Transition our texture to present state
 		barriers[0] = { pRenderTarget->pTexture, RESOURCE_STATE_PRESENT };
-		cmdResourceBarrier(cmd, 0, NULL, 1, barriers, false);
+		cmdResourceBarrier(cmd, 0, NULL, 1, barriers, true);
 
 		endCmd(cmd);
 		allCmds.push_back(cmd);
 
-		queueSubmit(pGraphicsQueue, allCmds.getCount(), allCmds.data(), pRenderCompleteFence, 1, &pImageAcquiredSemaphore, 1, &pRenderCompleteSemaphore);
+		queueSubmit(pGraphicsQueue, (uint32_t)allCmds.size(), allCmds.data(), pRenderCompleteFence, 1, &pImageAcquiredSemaphore, 1, &pRenderCompleteSemaphore);
 		queuePresent(pGraphicsQueue, pSwapChain, gFrameIndex, 1, &pRenderCompleteSemaphore);
 
 		Fence* pNextFence = pRenderCompleteFences[(gFrameIndex + 1) % gImageCount];
 		FenceStatus fenceStatus;
-		getFenceStatus(pNextFence, &fenceStatus);
+		getFenceStatus(pRenderer, pNextFence, &fenceStatus);
 		if (fenceStatus == FENCE_STATUS_INCOMPLETE)
 		{
-			waitForFences(pGraphicsQueue, 1, &pNextFence);
+			waitForFences(pGraphicsQueue, 1, &pNextFence, false);
 		}
 	}
 
 	String GetName()
 	{
-		return "08_Procedural";
+		return "UnitTest_08_Procedural";
 	}
 
-	// Generates an array of vertices and normals for a sphere
-	void generateSpherePoints(float **ppPoints, int *pNumberOfPoints, int numberOfDivisions)
+	bool addSwapChain()
 	{
-		float numStacks = (float)numberOfDivisions;
-		float numSlices = (float)numberOfDivisions;
-		float radius = 1.0f; // Diameter of 1
+		SwapChainDesc swapChainDesc = {};
+		swapChainDesc.pWindow = pWindow;
+		swapChainDesc.mPresentQueueCount = 1;
+		swapChainDesc.ppPresentQueues = &pGraphicsQueue;
+		swapChainDesc.mWidth = mSettings.mWidth;
+		swapChainDesc.mHeight = mSettings.mHeight;
+		swapChainDesc.mImageCount = gImageCount;
+		swapChainDesc.mSampleCount = SAMPLE_COUNT_1;
+		swapChainDesc.mColorFormat = getRecommendedSwapchainFormat(true);
+		swapChainDesc.mEnableVsync = false;
+		::addSwapChain(pRenderer, &swapChainDesc, &pSwapChain);
 
-		tinystl::vector<vec3> vertices;
-		tinystl::vector<vec3> normals;
-
-
-		for (int i = 0; i < numberOfDivisions; i++)
-		{
-			for (int j = 0; j < numberOfDivisions; j++)
-			{
-				// Sectioned into quads, utilizing two triangles
-				vec3 topLeftPoint = { (float)(-cos(2.0f * PI * i / numStacks) * sin(PI * (j + 1.0f) / numSlices)),
-					(float)(-cos(PI * (j + 1.0f) / numSlices)),
-					(float)(sin(2.0f * PI * i / numStacks) * sin(PI * (j + 1.0f) / numSlices)) };
-				vec3 topRightPoint = { (float)(-cos(2.0f * PI * (i + 1.0) / numStacks) * sin(PI * (j + 1.0) / numSlices)),
-					(float)(-cos(PI * (j + 1.0) / numSlices)),
-					(float)(sin(2.0f * PI * (i + 1.0) / numStacks) * sin(PI * (j + 1.0) / numSlices)) };
-				vec3 botLeftPoint = { (float)(-cos(2.0f * PI * i / numStacks) * sin(PI * j / numSlices)),
-					(float)(-cos(PI * j / numSlices)),
-					(float)(sin(2.0f * PI * i / numStacks) * sin(PI * j / numSlices)) };
-				vec3 botRightPoint = { (float)(-cos(2.0f * PI * (i + 1.0) / numStacks) * sin(PI * j / numSlices)),
-					(float)(-cos(PI * j / numSlices)),
-					(float)(sin(2.0f * PI * (i + 1.0) / numStacks) * sin(PI * j / numSlices)) };
-
-				// Top right triangle
-				vertices.push_back(radius * topLeftPoint);
-				vertices.push_back(radius * botRightPoint);
-				vertices.push_back(radius * topRightPoint);
-				normals.push_back(normalize(topLeftPoint));
-				normals.push_back(normalize(botRightPoint));
-				normals.push_back(normalize(topRightPoint));
-
-				// Bot left triangle
-				vertices.push_back(radius * topLeftPoint);
-				vertices.push_back(radius * botLeftPoint);
-				vertices.push_back(radius * botRightPoint);
-				normals.push_back(normalize(topLeftPoint));
-				normals.push_back(normalize(botLeftPoint));
-				normals.push_back(normalize(botRightPoint));
-			}
-		}
-
-
-		*pNumberOfPoints = vertices.getCount() * 3 * 2;
-		(*ppPoints) = (float *)conf_malloc(sizeof(float) * (*pNumberOfPoints));
-
-		for (uint32_t i = 0; i < vertices.getCount(); i++)
-		{
-			vec3 vertex = vertices[i];
-			vec3 normal = normals[i];
-			(*ppPoints)[i * 6 + 0] = vertex.getX();
-			(*ppPoints)[i * 6 + 1] = vertex.getY();
-			(*ppPoints)[i * 6 + 2] = vertex.getZ();
-			(*ppPoints)[i * 6 + 3] = normal.getX();
-			(*ppPoints)[i * 6 + 4] = normal.getY();
-			(*ppPoints)[i * 6 + 5] = normal.getZ();
-		}
+		return pSwapChain != NULL;
 	}
+
+	bool addDepthBuffer()
+	{
+		// Add depth buffer
+		RenderTargetDesc depthRT = {};
+		depthRT.mArraySize = 1;
+		depthRT.mClearValue = { 1.0f, 0 };
+		depthRT.mDepth = 1;
+		depthRT.mFormat = ImageFormat::D32F;
+		depthRT.mHeight = mSettings.mHeight;
+		depthRT.mSampleCount = SAMPLE_COUNT_1;
+		depthRT.mSampleQuality = 0;
+		depthRT.mType = RENDER_TARGET_TYPE_2D;
+		depthRT.mUsage = RENDER_TARGET_USAGE_DEPTH_STENCIL;
+		depthRT.mWidth = mSettings.mWidth;
+		addRenderTarget(pRenderer, &depthRT, &pDepthBuffer);
+
+		return pDepthBuffer != NULL;
+	}
+	
 
 #if defined(VULKAN)
 	void transitionRenderTargets()
@@ -951,7 +948,7 @@ public:
 		cmdResourceBarrier(ppCmds[0], 0, 0, numBarriers, rtBarriers, false);
 		endCmd(ppCmds[0]);
 		queueSubmit(pGraphicsQueue, 1, &ppCmds[0], pRenderCompleteFences[0], 0, NULL, 0, NULL);
-		waitForFences(pGraphicsQueue, 1, &pRenderCompleteFences[0]);
+		waitForFences(pGraphicsQueue, 1, &pRenderCompleteFences[0], false);
 	}
 #endif
 
@@ -973,6 +970,7 @@ public:
 
 	// Camera controller functionality
 #if USE_CAMERACONTROLLER
+#if !defined(_DURANGO)
 	static bool cameraMouseMove(const RawMouseMoveEventData* data)
 	{
 		pCameraController->onMouseMove(data);
@@ -990,7 +988,7 @@ public:
 		pCameraController->onMouseWheel(data);
 		return true;
 	}
-    
+#endif
 #ifdef TARGET_IOS
     static bool cameraTouch(const TouchEventData* data)
     {

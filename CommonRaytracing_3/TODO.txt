@@ -1,0 +1,2 @@
+- Provide offsets into Shader Table when calling DispatchRays
+- Reflection of Raytracing shaders when dxc adds the functionality

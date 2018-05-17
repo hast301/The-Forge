@@ -377,7 +377,7 @@ int ImageFormat::GetBytesPerPixel(const ImageFormat::Enum format)
   };
 
 
-  ASSERT(format <= ImageFormat::D32F);
+  ASSERT(format <= ImageFormat::D32F || format == ImageFormat::BGRA8);
 
   return bytesPP[format];
 }
@@ -493,7 +493,7 @@ const ImageFormatString* getFormatStrings()
 {
   static const ImageFormatString formatStrings[] =
   {
-    { ImageFormat::None,   "NONE" },
+    { ImageFormat::NONE,   "NONE" },
 
     { ImageFormat::R8,     "R8" },
     { ImageFormat::RG8,    "RG8" },
@@ -578,7 +578,7 @@ ImageFormat::Enum ImageFormat::GetFormatFromString(char *string)
     if (stricmp(string, getFormatStrings()[i].string) == 0)
       return getFormatStrings()[i].format;
   }
-  return ImageFormat::None;
+  return ImageFormat::NONE;
 }
 
 int ImageFormat::GetChannelCount(const ImageFormat::Enum format)
@@ -637,7 +637,7 @@ Image::Image() {
   mDepth = 0;
   mMipMapCount = 0;
   mArrayCount = 0;
-  mFormat = ImageFormat::None;
+  mFormat = ImageFormat::NONE;
   mAdditionalDataSize = 0;
   pAdditionalData = NULL;
   mIsRendertarget = false;
@@ -679,12 +679,15 @@ unsigned char *Image::Create(const ImageFormat::Enum fmt, const int w, const int
   return pData;
 }
 
-void Image::RedefineDimensions(const ImageFormat::Enum fmt, const int w, const int h, const int d) {
+void Image::RedefineDimensions(const ImageFormat::Enum fmt, const int w, const int h, const int d, const int mipMapCount, const int arraySize)
+{
 	//Redefine image that was loaded in
 	mFormat = fmt;
 	mWidth = w;
 	mHeight = h;
 	mDepth = d;
+	mMipMapCount = mipMapCount;
+	mArrayCount = arraySize;
 }
 
 void Image::Destroy()
@@ -711,7 +714,7 @@ void Image::Clear()
   mDepth = 0;
   mMipMapCount = 0;
   mArrayCount = 0;
-  mFormat = ImageFormat::None;
+  mFormat = ImageFormat::NONE;
 
   mAdditionalDataSize = 0;
 }
@@ -769,7 +772,7 @@ uint Image::GetArraySliceSize(const uint mipMapLevel, ImageFormat::Enum srcForma
   int w = GetWidth(mipMapLevel);
   int h = GetHeight(mipMapLevel);
 
-  if (srcFormat == ImageFormat::None)
+  if (srcFormat == ImageFormat::NONE)
     srcFormat = mFormat;
 
   int size;
@@ -960,7 +963,7 @@ uint Image::GetMipMappedSize(const uint firstMipMapLevel, uint nMipMapLevels, Im
   uint h = GetHeight(firstMipMapLevel);
   uint d = GetDepth(firstMipMapLevel);
 
-  if (srcFormat == ImageFormat::None)
+  if (srcFormat == ImageFormat::NONE)
     srcFormat = mFormat;
 
   // PVR formats get special case
@@ -1458,7 +1461,9 @@ bool Image::iLoadSTBIFP32FromMemory(const char *buffer, uint32_t memSize, const 
 	}
 
 	requiredCmp = cmp;
-#if defined(METAL) || defined(VULKAN)
+
+// These APIs do not support 96bpp, enforce required component number to be 4 so that hdr format can be automatically converted to 128bpp
+#if defined(METAL) || defined(VULKAN) || defined(_DURANGO)
 	if (cmp == 3)
 		requiredCmp = 4;
 #endif
@@ -1700,7 +1705,7 @@ bool Image::iLoadGNFFromMemory(const char* memory, size_t memSize, const bool us
     return false;
   }
 
-  char* memoryArray = new char[header.m_contentsSize];
+  char* memoryArray = (char*)conf_calloc(header.m_contentsSize, sizeof(char));
   sce::Gnf::Contents *gnfContents = NULL;
   gnfContents = (sce::Gnf::Contents*) memoryArray;
 
@@ -1744,7 +1749,7 @@ bool Image::iLoadGNFFromMemory(const char* memory, size_t memSize, const bool us
   //
   // we do this because on the addTexture level, we would like to have all this data to allocate and load the data
   //
-  pAdditionalData = new unsigned char[header.m_contentsSize];
+  pAdditionalData = (unsigned char*)conf_calloc(header.m_contentsSize, sizeof(unsigned char));
   memcpy(pAdditionalData, gnfContents, header.m_contentsSize);
 
   // storing all the pixel data in pixels
@@ -1786,7 +1791,7 @@ bool Image::iLoadGNFFromMemory(const char* memory, size_t memSize, const bool us
   memread(pixels, 1, size, mpoint);
   }
   */
-  delete(gnfContents);
+  conf_free(gnfContents);
 
   return !result;
 }
@@ -1822,17 +1827,15 @@ static ImageLoaderDefinition gImageLoaders[] =
   { ".dds", &Image::iLoadDDSFromMemory },
 #endif
   { ".pvr", &Image::iLoadPVRFromMemory },
+  // #TODO: Add KTX loader
 #ifdef _WIN32
-  { ".ktx", &Image::iLoadKTXFromMemory },
+  { ".ktx", NULL },
 #endif
   { ".exr", &Image::iLoadEXRFP32FromMemory },
 #if defined(ORBIS)
   { ".gnf", &Image::iLoadGNFFromMemory },
 #endif
 };
-
-
-
 
 void Image::loadFromMemoryXY(const void *mem, const int topLeftX, const int topLeftY, const int bottomRightX, const int bottomRightY, const int pitch)
 {

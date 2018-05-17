@@ -310,11 +310,11 @@ Scene* loadScene(const char* fileName)
     tinystl::vector<float3> normals(scene->totalVertices);
     tinystl::vector<float3> tangents(scene->totalVertices);
 
-    assimpScene.Read(scene->indices.getArray(), sizeof(uint32_t) * scene->totalTriangles);
-    assimpScene.Read(scene->positions.getArray(), sizeof(float3) * scene->totalVertices);
-    assimpScene.Read(texcoords.getArray(), sizeof(float2) * scene->totalVertices);
-    assimpScene.Read(normals.getArray(), sizeof(float3) * scene->totalVertices);
-    assimpScene.Read(tangents.getArray(), sizeof(float3) * scene->totalVertices);
+    assimpScene.Read(scene->indices.data(), sizeof(uint32_t) * scene->totalTriangles);
+    assimpScene.Read(scene->positions.data(), sizeof(float3) * scene->totalVertices);
+    assimpScene.Read(texcoords.data(), sizeof(float2) * scene->totalVertices);
+    assimpScene.Read(normals.data(), sizeof(float3) * scene->totalVertices);
+    assimpScene.Read(tangents.data(), sizeof(float3) * scene->totalVertices);
 
     for (uint32_t v = 0; v < scene->totalVertices; v++)
     {
@@ -322,11 +322,7 @@ Scene* loadScene(const char* fileName)
         const float3& tangent = tangents[v];
         const float2& tc = texcoords[v];
         
-#ifndef METAL
-        scene->normals[v].normal = encodeDir(normal);
-        scene->tangents[v].tangent = encodeDir(tangent);
-        scene->texCoords[v].texCoord = pack2Floats(float2(tc.x, 1.0f - tc.y));
-#else
+#if defined(METAL) || defined(LINUX)
         scene->normals[v].nx = normal.x;
         scene->normals[v].ny = normal.y;
         scene->normals[v].nz = normal.z;
@@ -337,6 +333,10 @@ Scene* loadScene(const char* fileName)
         
         scene->texCoords[v].u = tc.x;
         scene->texCoords[v].v = 1.0f - tc.y;
+#else
+        scene->normals[v].normal = encodeDir(normal);
+        scene->tangents[v].tangent = encodeDir(tangent);
+        scene->texCoords[v].texCoord = pack2Floats(float2(tc.x, 1.0f - tc.y));
 #endif
     }
 
@@ -346,12 +346,12 @@ Scene* loadScene(const char* fileName)
 
 		assimpScene.Read(&batch.materialId, sizeof(uint32_t));
         assimpScene.Read(&batch.vertexCount, sizeof(uint32_t));
-#ifndef METAL
-		assimpScene.Read(&batch.startIndex, sizeof(uint32_t));
-        assimpScene.Read(&batch.indexCount, sizeof(uint32_t));
-#else
+#if defined(METAL)
         assimpScene.Read(&batch.startVertex, sizeof(uint32_t));
         assimpScene.Read(&batch.vertexCount, sizeof(uint32_t));
+#else
+	assimpScene.Read(&batch.startIndex, sizeof(uint32_t));
+        assimpScene.Read(&batch.indexCount, sizeof(uint32_t));
 #endif
 	}
 
@@ -386,17 +386,17 @@ Scene* loadScene(const char* fileName)
 		assimpScene.Read(&matNameLength, sizeof(uint32_t));
 
 		tinystl::vector<char> matName(matNameLength);
-		assimpScene.Read(matName.getArray(), sizeof(char) * matNameLength);
+		assimpScene.Read(matName.data(), sizeof(char) * matNameLength);
 
 		uint32_t albedoNameLength = 0;
 		assimpScene.Read(&albedoNameLength, sizeof(uint32_t));
 
 		tinystl::vector<char> albedoName(albedoNameLength);
-		assimpScene.Read(albedoName.getArray(), sizeof(char)*albedoNameLength);
+		assimpScene.Read(albedoName.data(), sizeof(char)*albedoNameLength);
 
 		if (albedoName[0] != '\0')
 		{
-			String path(albedoName.getArray());
+			String path(albedoName.data());
 			uint dotPos = 0;
 #ifdef ORBIS
 			// try to load the GNF version instead: change extension to GNF
@@ -452,7 +452,7 @@ Scene* loadScene(const char* fileName)
 		assimpScene.Read(&twoSided, sizeof(float));  // load two sided
 		m.twoSided = (twoSided != 0);
 
-		String tinyMatName(matName.getArray());
+		String tinyMatName(matName.data());
 		if (twoSidedMaterials.find(tinyMatName) != twoSidedMaterials.end())
 			m.twoSided = true;
 
@@ -835,6 +835,7 @@ void createCubeBuffers(Renderer* pRenderer, CmdPool* cmdPool, Buffer** ppVertexB
 	vbDesc.mDesc.mVertexStride = sizeof(float) * 4;
 	vbDesc.pData = vertexData;
 	vbDesc.ppBuffer = ppVertexBuffer;
+	vbDesc.mDesc.pDebugName = L"VB Desc";
 	addResource(&vbDesc);
 
 	// Create index buffer
@@ -855,6 +856,7 @@ void createCubeBuffers(Renderer* pRenderer, CmdPool* cmdPool, Buffer** ppVertexB
 	ibDesc.mDesc.mIndexType = INDEX_TYPE_UINT16;
 	ibDesc.pData = indices;
 	ibDesc.ppBuffer = ppIndexBuffer;
+	ibDesc.mDesc.pDebugName = L"IB Desc";
 	addResource(&ibDesc);
 }
 

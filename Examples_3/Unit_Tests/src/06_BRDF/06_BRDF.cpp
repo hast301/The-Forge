@@ -27,26 +27,27 @@
 
 
 //tiny stl
-#include "../../Common_3/ThirdParty/OpenSource/TinySTL/vector.h"
-#include "../../Common_3/ThirdParty/OpenSource/TinySTL/string.h"
+#include "../../../../Common_3/ThirdParty/OpenSource/TinySTL/vector.h"
+#include "../../../../Common_3/ThirdParty/OpenSource/TinySTL/string.h"
 
 //Interfaces
-#include "../../Common_3/OS/Interfaces/ICameraController.h"
-#include "../../Common_3/OS/Interfaces/ILogManager.h"
-#include "../../Common_3/OS/Interfaces/IFileSystem.h"
-#include "../../Common_3/OS/Interfaces/ITimeManager.h"
-#include "../../Common_3/OS/Interfaces/IUIManager.h"
-#include "../../Common_3/Renderer/IRenderer.h"
-#include "../../Common_3/Renderer/ResourceLoader.h"
-#include "../../Common_3/OS/Interfaces/IApp.h"
+#include "../../../../Common_3/OS/Interfaces/ICameraController.h"
+#include "../../../../Common_3/OS/Interfaces/ILogManager.h"
+#include "../../../../Common_3/OS/Interfaces/IFileSystem.h"
+#include "../../../../Common_3/OS/Interfaces/ITimeManager.h"
+#include "../../../../Middleware_3/UI/AppUI.h"
+#include "../../../../Common_3/OS/Core/DebugRenderer.h"
+#include "../../../../Common_3/Renderer/IRenderer.h"
+#include "../../../../Common_3/Renderer/ResourceLoader.h"
+#include "../../../../Common_3/OS/Interfaces/IApp.h"
 
 //Renderer
-#include "../../Common_3/Renderer/GpuProfiler.h"
+#include "../../../../Common_3/Renderer/GpuProfiler.h"
 
 //Math
-#include "../../Common_3/OS/Math/MathTypes.h"
+#include "../../../../Common_3/OS/Math/MathTypes.h"
 
-#include "../../Common_3/OS/Interfaces/IMemoryManager.h"
+#include "../../../../Common_3/OS/Interfaces/IMemoryManager.h"
 
 
 /// Camera Controller
@@ -55,18 +56,34 @@
 
 #define USE_CAMERACONTROLLER FPS_CAMERACONTROLLER
 
-
 #if defined(DIRECT3D12)
 #define RESOURCE_DIR "PCDX12"
 #elif defined(VULKAN)
-#define RESOURCE_DIR "PCVulkan"
+	#if defined(_WIN32)
+	#define RESOURCE_DIR "PCVulkan"
+	#elif defined(LINUX)
+	#define RESOURCE_DIR "LINUXVulkan"
+	#endif
 #elif defined(METAL)
 #define RESOURCE_DIR "OSXMetal"
 #else
 #error PLATFORM NOT SUPPORTED
 #endif
 
-
+#ifdef _DURANGO
+// Durango load assets from 'Layout\Image\Loose'
+const char* pszRoots[] =
+{
+	"Shaders/Binary/",	// FSR_BinShaders
+	"Shaders/",		// FSR_SrcShaders
+	"Shaders/Binary/",			// FSR_BinShaders_Common
+	"Shaders/",					// FSR_SrcShaders_Common
+	"Textures/",						// FSR_Textures
+	"Meshes/",						// FSR_Meshes
+	"Fonts/",						// FSR_Builtin_Fonts
+	"",															// FSR_OtherFiles
+};
+#else
 //Example for using roots or will cause linker error with the extern root in FileSystem.cpp
 const char* pszRoots[] =
 {
@@ -79,6 +96,7 @@ const char* pszRoots[] =
 	"../../../UnitTestResources/Fonts/",				// FSR_Builtin_Fonts
 	"",													// FSR_OtherFiles
 };
+#endif
 
 LogManager gLogManager;
 
@@ -93,7 +111,7 @@ struct UniformCamData
 struct UniformObjData
 {
 	mat4 mWorldMat;
-	float mRoughness = 0.0f;
+	float mRoughness = 0.04f;
 	float mMetallic = 0.0f;
 };
 
@@ -115,10 +133,10 @@ struct UniformLightData
 	Light mLights[16]; // array of lights seem to be broken so just a single light for now
 };
 
-const uint32_t			    gImageCount = 3;
+const uint32_t				gImageCount = 3;
 
-Renderer*				    pRenderer = nullptr;
-UIManager*					pUIManager = nullptr;
+Renderer*					pRenderer = nullptr;
+UIApp						gAppUI;
 
 Queue*						pGraphicsQueue = nullptr;
 CmdPool*					pCmdPool = nullptr;
@@ -135,18 +153,18 @@ Shader*						pShaderBRDF = nullptr;
 Pipeline*					pPipelineBRDF = nullptr;
 RootSignature*				pRootSigBRDF = nullptr;
 
-Buffer*                     pSkyboxVertexBuffer = nullptr;
-Shader*                     pSkyboxShader = nullptr;
-Pipeline*                   pSkyboxPipeline = nullptr;
-RootSignature*              pSkyboxRootSignature = nullptr;
+Buffer*						pSkyboxVertexBuffer = nullptr;
+Shader*						pSkyboxShader = nullptr;
+Pipeline*					pSkyboxPipeline = nullptr;
+RootSignature*				pSkyboxRootSignature = nullptr;
 
-Texture*                    pSkybox = nullptr;
-Texture*                    pBRDFIntegrationMap = nullptr;
-Texture*                    pIrradianceMap = nullptr;
-Texture*                    pSpecularMap = nullptr;
+Texture*					pSkybox = nullptr;
+Texture*					pBRDFIntegrationMap = nullptr;
+Texture*					pIrradianceMap = nullptr;
+Texture*					pSpecularMap = nullptr;
 
 #ifdef TARGET_IOS
-Texture*                    pVirtualJoystickTex = nullptr;
+Texture*					pVirtualJoystickTex = nullptr;
 #endif
 
 UniformObjData				pUniformDataMVP;
@@ -175,6 +193,7 @@ GpuProfiler*				pGpuProfiler = nullptr;
 
 
 const int					gSphereResolution = 30; // Increase for higher resolution spheres
+const float					gSphereDiameter = 0.5f;
 int							gNumOfSpherePoints;
 
 // How many objects in x and y direction
@@ -193,6 +212,8 @@ tinystl::vector<Buffer*>	gSphereBuffers;
 
 ICameraController*			pCameraController = nullptr;
 
+DebugTextDrawDesc gFrameTimeDraw = DebugTextDrawDesc(0, 0xff00ffff, 18);
+
 void transitionRenderTargets()
 {
 	// Transition render targets to desired state
@@ -205,7 +226,7 @@ void transitionRenderTargets()
 	cmdResourceBarrier(ppCmds[0], 0, 0, numBarriers, rtBarriers, false);
 	endCmd(ppCmds[0]);
 	queueSubmit(pGraphicsQueue, 1, &ppCmds[0], pRenderCompleteFences[0], 0, NULL, 0, NULL);
-	waitForFences(pGraphicsQueue, 1, &pRenderCompleteFences[0]);
+	waitForFences(pGraphicsQueue, 1, &pRenderCompleteFences[0], false);
 }
 
 // Compute PBR maps (skybox, BRDF Integration Map, Irradiance Map and Specular Map).
@@ -231,7 +252,10 @@ void computePBRMaps()
     Pipeline* pSpecularPipeline = nullptr;
     Sampler* pSkyboxSampler = nullptr;
     
-    addSampler(pRenderer, &pSkyboxSampler, FILTER_TRILINEAR, FILTER_TRILINEAR, MIPMAP_MODE_LINEAR, ADDRESS_MODE_REPEAT, ADDRESS_MODE_REPEAT, ADDRESS_MODE_REPEAT, 0, 16);
+	SamplerDesc samplerDesc = {
+		FILTER_TRILINEAR, FILTER_TRILINEAR, MIPMAP_MODE_LINEAR, ADDRESS_MODE_REPEAT, ADDRESS_MODE_REPEAT, ADDRESS_MODE_REPEAT, 0, 16
+	};
+    addSampler(pRenderer, &samplerDesc, &pSkyboxSampler);
     
     // Load the skybox panorama texture.
     TextureLoadDesc panoDesc = {};
@@ -341,15 +365,19 @@ void computePBRMaps()
 	ShaderLoadDesc specularShaderDesc = {};
 	specularShaderDesc.mStages[0] = { "computeSpecularMap.comp", NULL, 0, FSR_SrcShaders };
 
-    
     addShader(pRenderer, &panoToCubeShaderDesc, &pPanoToCubeShader);
-    addRootSignature(pRenderer, 1, &pPanoToCubeShader, &pPanoToCubeRootSignature);
     addShader(pRenderer, &brdfIntegrationShaderDesc, &pBRDFIntegrationShader);
-    addRootSignature(pRenderer, 1, &pBRDFIntegrationShader, &pBRDFIntegrationRootSignature);
     addShader(pRenderer, &irradianceShaderDesc, &pIrradianceShader);
-    addRootSignature(pRenderer, 1, &pIrradianceShader, &pIrradianceRootSignature);
     addShader(pRenderer, &specularShaderDesc, &pSpecularShader);
-    addRootSignature(pRenderer, 1, &pSpecularShader, &pSpecularRootSignature);
+
+	RootSignatureDesc panoRootDesc = { &pPanoToCubeShader, 1 };
+	RootSignatureDesc brdfRootDesc = { &pBRDFIntegrationShader, 1 };
+	RootSignatureDesc irradianceRootDesc = { &pIrradianceShader, 1 };
+	RootSignatureDesc specularRootDesc = { &pSpecularShader, 1 };
+    addRootSignature(pRenderer, &panoRootDesc, &pPanoToCubeRootSignature);
+    addRootSignature(pRenderer, &brdfRootDesc, &pBRDFIntegrationRootSignature);
+    addRootSignature(pRenderer, &irradianceRootDesc, &pIrradianceRootSignature);
+    addRootSignature(pRenderer, &specularRootDesc, &pSpecularRootSignature);
     
     ComputePipelineDesc pipelineSettings = { 0 };
     pipelineSettings.pShaderProgram = pPanoToCubeShader;
@@ -376,7 +404,7 @@ void computePBRMaps()
     params[0].pName = "dstTexture";
     params[0].ppTextures = &pBRDFIntegrationMap;
     cmdBindDescriptors(cmd, pBRDFIntegrationRootSignature, 1, params);
-    const uint32_t* pThreadGroupSize = pBRDFIntegrationShader->mNumThreadsPerGroup;
+    const uint32_t* pThreadGroupSize = pBRDFIntegrationShader->mReflection.mStageReflections[0].mNumThreadsPerGroup;
     cmdDispatch(cmd, gBRDFIntegrationSize / pThreadGroupSize[0], gBRDFIntegrationSize / pThreadGroupSize[1], pThreadGroupSize[2]);
 
 	TextureBarrier srvBarrier = { pBRDFIntegrationMap, RESOURCE_STATE_SHADER_RESOURCE };
@@ -389,15 +417,15 @@ void computePBRMaps()
     params[1].pName = "dstBuffer";
     params[1].ppBuffers = &pSkyBuffer;
     cmdBindDescriptors(cmd, pPanoToCubeRootSignature, 2, params);
-    pThreadGroupSize = pPanoToCubeShader->mNumThreadsPerGroup;
+    pThreadGroupSize = pPanoToCubeShader->mReflection.mStageReflections[0].mNumThreadsPerGroup;
     cmdDispatch(cmd, gSkyboxSize / pThreadGroupSize[0], gSkyboxSize / pThreadGroupSize[1], 6);
     endCmd(cmd);
     queueSubmit(pGraphicsQueue, 1, &cmd, pRenderCompleteFence, 0, 0, 0, 0);
-    waitForFences(pGraphicsQueue, 1, &pRenderCompleteFence);
+    waitForFences(pGraphicsQueue, 1, &pRenderCompleteFence, false);
     
     // Upload the cubemap skybox's CPU image contents to the GPU.
     memcpy(skyboxImgBuff, pSkyBuffer->pCpuMappedAddress, skyboxSize);
-    TextureLoadDesc skyboxUpload;
+	TextureLoadDesc skyboxUpload = {};
     skyboxUpload.pImage = &skyboxImg;
     skyboxUpload.ppTexture = &pSkybox;
     addResource(&skyboxUpload);
@@ -412,7 +440,7 @@ void computePBRMaps()
     params[2].pName = "skyboxSampler";
     params[2].ppSamplers = &pSkyboxSampler;
     cmdBindDescriptors(cmd, pIrradianceRootSignature, 3, params);
-    pThreadGroupSize = pIrradianceShader->mNumThreadsPerGroup;
+    pThreadGroupSize = pIrradianceShader->mReflection.mStageReflections[0].mNumThreadsPerGroup;
     cmdDispatch(cmd, gIrradianceSize / pThreadGroupSize[0], gIrradianceSize / pThreadGroupSize[1], 6);
     cmdBindPipeline(cmd, pSpecularPipeline);
     params[0].pName = "srcTexture";
@@ -422,20 +450,20 @@ void computePBRMaps()
     params[2].pName = "skyboxSampler";
     params[2].ppSamplers = &pSkyboxSampler;
     cmdBindDescriptors(cmd, pSpecularRootSignature, 3, params);
-    pThreadGroupSize = pSpecularShader->mNumThreadsPerGroup;
+    pThreadGroupSize = pSpecularShader->mReflection.mStageReflections[0].mNumThreadsPerGroup;
     cmdDispatch(cmd, gSpecularSize / pThreadGroupSize[0], gSpecularSize / pThreadGroupSize[1], 6);
     endCmd(cmd);
     queueSubmit(pGraphicsQueue, 1, &cmd, pRenderCompleteFence, 0, 0, 0, 0);
-    waitForFences(pGraphicsQueue, 1, &pRenderCompleteFence);
+    waitForFences(pGraphicsQueue, 1, &pRenderCompleteFence, false);
     
     // Upload both the irradiance and specular maps to GPU.
     memcpy(irrImgBuff, pIrrBuffer->pCpuMappedAddress, irrSize);
     memcpy(specImgBuff, pSpecBuffer->pCpuMappedAddress, specSize);
-    TextureLoadDesc irrUpload;
+	TextureLoadDesc irrUpload = {};
     irrUpload.pImage = &irrImg;
     irrUpload.ppTexture = &pIrradianceMap;
     addResource(&irrUpload);
-    TextureLoadDesc specUpload;
+	TextureLoadDesc specUpload = {};
     specUpload.pImage = &specImg;
     specUpload.ppTexture = &pSpecularMap;
     addResource(&specUpload);
@@ -492,9 +520,7 @@ public:
 		addSemaphore(pRenderer, &pImageAcquiredSemaphore);
 
 		initResourceLoaderInterface(pRenderer, DEFAULT_MEMORY_BUDGET, true);
-
-		if (!Load())
-			return false;
+		initDebugRendererInterface(pRenderer, FileSystem::FixPath("TitilliumText/TitilliumText-Bold.ttf", FSR_Builtin_Fonts));
         
 #ifdef TARGET_IOS
         // Add virtual joystick texture.
@@ -509,7 +535,11 @@ public:
 		addGpuProfiler(pRenderer, pGraphicsQueue, &pGpuProfiler);
 		computePBRMaps();
 
-		addSampler(pRenderer, &pSamplerBilinear, FILTER_BILINEAR, FILTER_BILINEAR, MIPMAP_MODE_LINEAR);
+		SamplerDesc samplerDesc = {
+			FILTER_BILINEAR, FILTER_BILINEAR, MIPMAP_MODE_LINEAR,
+			ADDRESS_MODE_CLAMP_TO_EDGE, ADDRESS_MODE_CLAMP_TO_EDGE, ADDRESS_MODE_CLAMP_TO_EDGE
+		};
+		addSampler(pRenderer, &samplerDesc, &pSamplerBilinear);
  
 		ShaderLoadDesc brdfRenderSceneShaderDesc = {};
 		brdfRenderSceneShaderDesc.mStages[0] = { "renderSceneBRDF.vert", NULL, 0, FSR_SrcShaders };
@@ -522,18 +552,33 @@ public:
 		addShader(pRenderer, &brdfRenderSceneShaderDesc, &pShaderBRDF);
         addShader(pRenderer, &skyboxShaderDesc, &pSkyboxShader);
 
-		RootSignatureDesc skyboxRootDesc = {};
-		skyboxRootDesc.mStaticSamplers["skyboxSampler"] = pSamplerBilinear;
+		const char* pBRDFSamplerName = "envSampler";
+		const char* pSkyboxamplerName = "skyboxSampler";
+		RootSignatureDesc brdfRootDesc = { &pShaderBRDF, 1 };
+		brdfRootDesc.mStaticSamplerCount = 1;
+		brdfRootDesc.ppStaticSamplerNames = &pBRDFSamplerName;
+		brdfRootDesc.ppStaticSamplers = &pSamplerBilinear;
+		addRootSignature(pRenderer, &brdfRootDesc, &pRootSigBRDF);
 
-		addRootSignature(pRenderer, 1, &pShaderBRDF, &pRootSigBRDF);
-        addRootSignature(pRenderer, 1, &pSkyboxShader, &pSkyboxRootSignature, &skyboxRootDesc);
+		RootSignatureDesc skyboxRootDesc = { &pSkyboxShader, 1 };
+		skyboxRootDesc.mStaticSamplerCount = 1;
+		skyboxRootDesc.ppStaticSamplerNames = &pSkyboxamplerName;
+		skyboxRootDesc.ppStaticSamplers = &pSamplerBilinear;
+		addRootSignature(pRenderer, &skyboxRootDesc, &pSkyboxRootSignature);
 
 		// Create depth state and rasterizer state
-		addDepthState(pRenderer, &pDepth, true, true);
-		addRasterizerState(&pRasterstateDefault, CULL_MODE_NONE);
+		DepthStateDesc depthStateDesc = {};
+		depthStateDesc.mDepthTest = true;
+		depthStateDesc.mDepthWrite = true;
+		depthStateDesc.mDepthFunc = CMP_LEQUAL;
+		addDepthState(pRenderer, &depthStateDesc, &pDepth);
+
+		RasterizerStateDesc rasterizerStateDesc = {};
+		rasterizerStateDesc.mCullMode = CULL_MODE_NONE;
+		addRasterizerState(pRenderer, &rasterizerStateDesc, &pRasterstateDefault);
 
 		float* pSPherePoints;
-		generateSpherePoints(&pSPherePoints, &gNumOfSpherePoints, gSphereResolution);
+		generateSpherePoints(&pSPherePoints, &gNumOfSpherePoints, gSphereResolution, gSphereDiameter);
 
 		uint64_t sphereDataSize = gNumOfSpherePoints * sizeof(float);
 
@@ -547,34 +592,6 @@ public:
 		addResource(&sphereVbDesc);
 
 		conf_free(pSPherePoints);
-
-		// Create vertex layout
-		VertexLayout vertexLayoutSphere = {};
-		vertexLayoutSphere.mAttribCount = 2;
-
-		vertexLayoutSphere.mAttribs[0].mSemantic = SEMANTIC_POSITION;
-		vertexLayoutSphere.mAttribs[0].mFormat = ImageFormat::RGB32F;
-		vertexLayoutSphere.mAttribs[0].mBinding = 0;
-		vertexLayoutSphere.mAttribs[0].mLocation = 0;
-		vertexLayoutSphere.mAttribs[0].mOffset = 0;
-
-		vertexLayoutSphere.mAttribs[1].mSemantic = SEMANTIC_NORMAL;
-		vertexLayoutSphere.mAttribs[1].mFormat = ImageFormat::RGB32F;
-		vertexLayoutSphere.mAttribs[1].mBinding = 0;
-		vertexLayoutSphere.mAttribs[1].mLocation = 1;
-		vertexLayoutSphere.mAttribs[1].mOffset = 3 * sizeof(float); // first attribute contains 3 floats
-
-		GraphicsPipelineDesc pipelineSettings = { 0 };
-		pipelineSettings.mPrimitiveTopo = PRIMITIVE_TOPO_TRI_LIST;
-		pipelineSettings.mRenderTargetCount = 1;
-		pipelineSettings.pDepthState = pDepth;
-		pipelineSettings.pDepthStencil = pDepthBuffer;
-		pipelineSettings.ppRenderTargets = &pSwapChain->ppSwapchainRenderTargets[0];
-		pipelineSettings.pRootSignature = pRootSigBRDF;
-		pipelineSettings.pShaderProgram = pShaderBRDF;
-		pipelineSettings.pVertexLayout = &vertexLayoutSphere;
-		pipelineSettings.pRasterizerState = pRasterstateDefault;
-		addPipeline(pRenderer, &pipelineSettings, &pPipelineBRDF);
         
         //Generate sky box vertex buffer
         float skyBoxPoints[] = {
@@ -630,27 +647,6 @@ public:
         skyboxVbDesc.pData = skyBoxPoints;
         skyboxVbDesc.ppBuffer = &pSkyboxVertexBuffer;
         addResource(&skyboxVbDesc);
-        
-        //layout and pipeline for skybox draw
-        VertexLayout vertexLayoutSkybox = {};
-        vertexLayoutSkybox.mAttribCount = 1;
-        vertexLayoutSkybox.mAttribs[0].mSemantic = SEMANTIC_POSITION;
-        vertexLayoutSkybox.mAttribs[0].mFormat = ImageFormat::RGBA32F;
-        vertexLayoutSkybox.mAttribs[0].mBinding = 0;
-        vertexLayoutSkybox.mAttribs[0].mLocation = 0;
-        vertexLayoutSkybox.mAttribs[0].mOffset = 0;
-        
-        pipelineSettings = { 0 };
-        pipelineSettings.mPrimitiveTopo = PRIMITIVE_TOPO_TRI_LIST;
-        pipelineSettings.mRenderTargetCount = 1;
-        pipelineSettings.pDepthState = NULL;
-        pipelineSettings.pDepthStencil = pDepthBuffer;
-        pipelineSettings.ppRenderTargets = &pSwapChain->ppSwapchainRenderTargets[0];
-        pipelineSettings.pRootSignature = pSkyboxRootSignature;
-        pipelineSettings.pShaderProgram = pSkyboxShader;
-        pipelineSettings.pVertexLayout = &vertexLayoutSkybox;
-        pipelineSettings.pRasterizerState = pRasterstateDefault;
-        addPipeline(pRenderer, &pipelineSettings, &pSkyboxPipeline);
 
 		// Create a uniform buffer per obj
 		for (int y = 0; y < gAmountObjectsinY; ++y)
@@ -708,8 +704,8 @@ public:
 			{
 				mat4 modelmat = mat4::translation(vec3(baseX + x, baseY + y, 0.0f));
 				pUniformDataMVP.mWorldMat = modelmat;
-				pUniformDataMVP.mMetallic = x / (float)gAmountObjectsinX + 0.001f;
-				pUniformDataMVP.mRoughness = y / (float)gAmountObjectsinY + 0.001f;
+				pUniformDataMVP.mMetallic = x / (float)gAmountObjectsinX;
+				pUniformDataMVP.mRoughness = y / (float)gAmountObjectsinY + 0.04f;
 
 				BufferUpdateDesc objBuffUpdateDesc = { gSphereBuffers[(x + y * gAmountObjectsinY)], &pUniformDataMVP };
 				updateResource(&objBuffUpdateDesc);
@@ -754,9 +750,10 @@ public:
 		updateResource(&lightBuffUpdateDesc);
 
 		// Create UI
-		UISettings uiSettings = {};
-		uiSettings.pDefaultFontName = "TitilliumText/TitilliumText-Bold.ttf";
-		addUIManagerInterface(pRenderer, &uiSettings, &pUIManager);
+		if (!gAppUI.Init(pRenderer))
+			return false;
+
+		gAppUI.LoadFont(FileSystem::FixPath("TitilliumText/TitilliumText-Bold.ttf", FSR_Builtin_Fonts));
 
 #if USE_CAMERACONTROLLER
 		CameraMotionParameters camParameters{ 100.0f, 150.0f, 300.0f };
@@ -772,29 +769,29 @@ public:
 
 		pCameraController->setMotionParameters(camParameters);
 
+#if !defined(_DURANGO)
 		registerRawMouseMoveEvent(cameraMouseMove);
 		registerMouseButtonEvent(cameraMouseButton);
 		registerMouseWheelEvent(cameraMouseWheel);
-        
+#endif
+
 #ifdef TARGET_IOS
         registerTouchEvent(cameraTouch);
         registerTouchMoveEvent(cameraTouchMove);
 #endif
-#endif
-
-#if defined(VULKAN)
-		transitionRenderTargets();
 #endif
 		return true;
 	}
 
 	void Exit()
 	{
-		waitForFences(pGraphicsQueue, 1, &pRenderCompleteFences[gFrameIndex]);
+		waitForFences(pGraphicsQueue, 1, &pRenderCompleteFences[gFrameIndex], true);
 
 #if USE_CAMERACONTROLLER
 		destroyCameraController(pCameraController);
 #endif
+
+		removeDebugRendererInterface();
 
 		for (uint32_t i = 0; i < gImageCount; ++i)	
 		{
@@ -820,12 +817,10 @@ public:
         removeResource(pSkyboxVertexBuffer);
 		removeResource(pSphereVertexBuffer);
 
-		removeUIManagerInterface(pRenderer, pUIManager);
+		gAppUI.Exit();
 
 		removeShader(pRenderer, pShaderBRDF);
         removeShader(pRenderer, pSkyboxShader);
-
-		removeRenderTarget(pRenderer, pDepthBuffer);
 
 		for (int i = 0; i < gAmountObjectsinY*gAmountObjectsinX; ++i)
 		{
@@ -836,13 +831,8 @@ public:
 		removeRasterizerState(pRasterstateDefault);
 		removeSampler(pRenderer, pSamplerBilinear);
 
-		removePipeline(pRenderer, pPipelineBRDF);
-        removePipeline(pRenderer, pSkyboxPipeline);
-
 		removeRootSignature(pRenderer, pRootSigBRDF);
         removeRootSignature(pRenderer, pSkyboxRootSignature);
-
-		removeSwapChain(pRenderer, pSwapChain);
 
 		// Remove commands and command pool&
 		removeCmd_n(pCmdPool, gImageCount, ppCmds);
@@ -856,40 +846,86 @@ public:
 
 	bool Load()
 	{
-		SwapChainDesc swapChainDesc = {};
-		swapChainDesc.pWindow = pWindow;
-		swapChainDesc.pQueue = pGraphicsQueue;
-		swapChainDesc.mWidth = mSettings.mWidth;
-		swapChainDesc.mHeight = mSettings.mHeight;
-		swapChainDesc.mImageCount = gImageCount;
-		swapChainDesc.mSampleCount = SAMPLE_COUNT_1;
-		swapChainDesc.mColorFormat = ImageFormat::BGRA8;
-		swapChainDesc.mEnableVsync = false;
-		addSwapChain(pRenderer, &swapChainDesc, &pSwapChain);
+		if (!addSwapChain())
+			return false;
 
-		// Add depth buffer
-		RenderTargetDesc depthRT = {};
-		depthRT.mArraySize = 1;
-		depthRT.mClearValue = { 1.0f, 0 };
-		depthRT.mDepth = 1;
-		depthRT.mFormat = ImageFormat::D32F;
-		depthRT.mHeight = mSettings.mHeight;
-		depthRT.mSampleCount = SAMPLE_COUNT_1;
-		depthRT.mSampleQuality = 0;
-		depthRT.mType = RENDER_TARGET_TYPE_2D;
-		depthRT.mUsage = RENDER_TARGET_USAGE_DEPTH_STENCIL;
-		depthRT.mWidth = mSettings.mWidth;
-#ifdef TARGET_IOS
-		depthRT.mFlags = TEXTURE_CREATION_FLAG_ON_TILE;
+		if (!addDepthBuffer())
+			return false;
+
+		if (!gAppUI.Load(pSwapChain->ppSwapchainRenderTargets))
+			return false;
+
+		// Create vertex layout
+		VertexLayout vertexLayoutSphere = {};
+		vertexLayoutSphere.mAttribCount = 2;
+
+		vertexLayoutSphere.mAttribs[0].mSemantic = SEMANTIC_POSITION;
+		vertexLayoutSphere.mAttribs[0].mFormat = ImageFormat::RGB32F;
+		vertexLayoutSphere.mAttribs[0].mBinding = 0;
+		vertexLayoutSphere.mAttribs[0].mLocation = 0;
+		vertexLayoutSphere.mAttribs[0].mOffset = 0;
+
+		vertexLayoutSphere.mAttribs[1].mSemantic = SEMANTIC_NORMAL;
+		vertexLayoutSphere.mAttribs[1].mFormat = ImageFormat::RGB32F;
+		vertexLayoutSphere.mAttribs[1].mBinding = 0;
+		vertexLayoutSphere.mAttribs[1].mLocation = 1;
+		vertexLayoutSphere.mAttribs[1].mOffset = 3 * sizeof(float); // first attribute contains 3 floats
+
+		GraphicsPipelineDesc pipelineSettings = { 0 };
+		pipelineSettings.mPrimitiveTopo = PRIMITIVE_TOPO_TRI_LIST;
+		pipelineSettings.mRenderTargetCount = 1;
+		pipelineSettings.pDepthState = pDepth;
+		pipelineSettings.pColorFormats = &pSwapChain->ppSwapchainRenderTargets[0]->mDesc.mFormat;
+		pipelineSettings.pSrgbValues = &pSwapChain->ppSwapchainRenderTargets[0]->mDesc.mSrgb;
+		pipelineSettings.mSampleCount = pSwapChain->ppSwapchainRenderTargets[0]->mDesc.mSampleCount;
+		pipelineSettings.mSampleQuality = pSwapChain->ppSwapchainRenderTargets[0]->mDesc.mSampleQuality;
+		pipelineSettings.mDepthStencilFormat = pDepthBuffer->mDesc.mFormat;
+		pipelineSettings.pRootSignature = pRootSigBRDF;
+		pipelineSettings.pShaderProgram = pShaderBRDF;
+		pipelineSettings.pVertexLayout = &vertexLayoutSphere;
+		pipelineSettings.pRasterizerState = pRasterstateDefault;
+		addPipeline(pRenderer, &pipelineSettings, &pPipelineBRDF);
+
+		//layout and pipeline for skybox draw
+		VertexLayout vertexLayoutSkybox = {};
+		vertexLayoutSkybox.mAttribCount = 1;
+		vertexLayoutSkybox.mAttribs[0].mSemantic = SEMANTIC_POSITION;
+		vertexLayoutSkybox.mAttribs[0].mFormat = ImageFormat::RGBA32F;
+		vertexLayoutSkybox.mAttribs[0].mBinding = 0;
+		vertexLayoutSkybox.mAttribs[0].mLocation = 0;
+		vertexLayoutSkybox.mAttribs[0].mOffset = 0;
+
+		pipelineSettings = { 0 };
+		pipelineSettings.mPrimitiveTopo = PRIMITIVE_TOPO_TRI_LIST;
+		pipelineSettings.mRenderTargetCount = 1;
+		pipelineSettings.pDepthState = NULL;
+		pipelineSettings.pColorFormats = &pSwapChain->ppSwapchainRenderTargets[0]->mDesc.mFormat;
+		pipelineSettings.pSrgbValues = &pSwapChain->ppSwapchainRenderTargets[0]->mDesc.mSrgb;
+		pipelineSettings.mSampleCount = pSwapChain->ppSwapchainRenderTargets[0]->mDesc.mSampleCount;
+		pipelineSettings.mSampleQuality = pSwapChain->ppSwapchainRenderTargets[0]->mDesc.mSampleQuality;
+		pipelineSettings.mDepthStencilFormat = pDepthBuffer->mDesc.mFormat;
+		pipelineSettings.pRootSignature = pSkyboxRootSignature;
+		pipelineSettings.pShaderProgram = pSkyboxShader;
+		pipelineSettings.pVertexLayout = &vertexLayoutSkybox;
+		pipelineSettings.pRasterizerState = pRasterstateDefault;
+		addPipeline(pRenderer, &pipelineSettings, &pSkyboxPipeline);
+
+#if defined(VULKAN)
+		transitionRenderTargets();
 #endif
-		addRenderTarget(pRenderer, &depthRT, &pDepthBuffer);
 
 		return true;
 	}
 
 	void Unload()
 	{
-		waitForFences(pGraphicsQueue, 1, &pRenderCompleteFences[gFrameIndex]);
+		waitForFences(pGraphicsQueue, 1, &pRenderCompleteFences[gFrameIndex], true);
+
+		gAppUI.Unload();
+
+		removePipeline(pRenderer, pPipelineBRDF);
+		removePipeline(pRenderer, pSkyboxPipeline);
+
 		removeRenderTarget(pRenderer, pDepthBuffer);
 		removeSwapChain(pRenderer, pSwapChain);
 	}
@@ -949,12 +985,11 @@ public:
 
 		cmdBeginGpuFrameProfile(cmd, pGpuProfiler);
 
-
 		// Transfer our render target to a render target state
 		TextureBarrier barrier = { pRenderTarget->pTexture, RESOURCE_STATE_RENDER_TARGET };
 		cmdResourceBarrier(cmd, 0, NULL, 1, &barrier, false);
 
-		cmdBeginRender(cmd, 1, &pRenderTarget, pDepthBuffer, &loadActions);
+		cmdBindRenderTargets(cmd, 1, &pRenderTarget, pDepthBuffer, &loadActions);
 		cmdSetViewport(cmd, 0.0f, 0.0f, (float)pRenderTarget->mDesc.mWidth, (float)pRenderTarget->mDesc.mHeight, 0.0f, 1.0f);
 		cmdSetScissor(cmd, 0, 0, pRenderTarget->mDesc.mWidth, pRenderTarget->mDesc.mHeight);
         
@@ -996,50 +1031,45 @@ public:
 			cmdDrawInstanced(cmd, gNumOfSpherePoints / 6, 0, 1);
 		}
 
-		cmdEndRender(cmd, 1, &pRenderTarget, pDepthBuffer);
-
-		cmdEndGpuFrameProfile(cmd, pGpuProfiler);
-
-
-		// Prepare UI command buffers
-		cmdBeginRender(cmd, 1, &pRenderTarget, NULL, NULL);
-		cmdUIBeginRender(cmd, pUIManager, 1, &pRenderTarget, NULL);
 		static HiresTimer gTimer;
-        
+		gTimer.GetUSec(true);
+
 #ifdef TARGET_IOS
-        // Draw the camera controller's virtual joysticks.
-        float extSide = min(mSettings.mHeight, mSettings.mWidth) * pCameraController->getVirtualJoystickExternalRadius();
-        float intSide = min(mSettings.mHeight, mSettings.mWidth) * pCameraController->getVirtualJoystickInternalRadius();
-        
-        vec2 joystickSize = vec2(extSide);
-        vec2 leftJoystickCenter = pCameraController->getVirtualLeftJoystickCenter();
-        vec2 leftJoystickPos = vec2(leftJoystickCenter.getX() * mSettings.mWidth, leftJoystickCenter.getY() * mSettings.mHeight) - 0.5f * joystickSize;
-        cmdUIDrawTexturedQuad(cmd, pUIManager, leftJoystickPos, joystickSize, pVirtualJoystickTex);
-        vec2 rightJoystickCenter = pCameraController->getVirtualRightJoystickCenter();
-        vec2 rightJoystickPos = vec2(rightJoystickCenter.getX() * mSettings.mWidth, rightJoystickCenter.getY() * mSettings.mHeight) - 0.5f * joystickSize;
-        cmdUIDrawTexturedQuad(cmd, pUIManager, rightJoystickPos, joystickSize, pVirtualJoystickTex);
-        
-        joystickSize = vec2(intSide);
-        leftJoystickCenter = pCameraController->getVirtualLeftJoystickPos();
-        leftJoystickPos = vec2(leftJoystickCenter.getX() * mSettings.mWidth, leftJoystickCenter.getY() * mSettings.mHeight) - 0.5f * joystickSize;
-        cmdUIDrawTexturedQuad(cmd, pUIManager, leftJoystickPos, joystickSize, pVirtualJoystickTex);
-        rightJoystickCenter = pCameraController->getVirtualRightJoystickPos();
-        rightJoystickPos = vec2(rightJoystickCenter.getX() * mSettings.mWidth, rightJoystickCenter.getY() * mSettings.mHeight) - 0.5f * joystickSize;
-        cmdUIDrawTexturedQuad(cmd, pUIManager, rightJoystickPos, joystickSize, pVirtualJoystickTex);
+		// Draw the camera controller's virtual joysticks.
+		float extSide = min(mSettings.mHeight, mSettings.mWidth) * pCameraController->getVirtualJoystickExternalRadius();
+		float intSide = min(mSettings.mHeight, mSettings.mWidth) * pCameraController->getVirtualJoystickInternalRadius();
+
+		float2 joystickSize = float2(extSide);
+		vec2 leftJoystickCenter = pCameraController->getVirtualLeftJoystickCenter();
+		float2 leftJoystickPos = float2(leftJoystickCenter.getX() * mSettings.mWidth, leftJoystickCenter.getY() * mSettings.mHeight) - 0.5f * joystickSize;
+		drawDebugTexture(cmd, leftJoystickPos.x, leftJoystickPos.y, joystickSize.x, joystickSize.y, pVirtualJoystickTex, 1.0f, 1.0f, 1.0f);
+		vec2 rightJoystickCenter = pCameraController->getVirtualRightJoystickCenter();
+		float2 rightJoystickPos = float2(rightJoystickCenter.getX() * mSettings.mWidth, rightJoystickCenter.getY() * mSettings.mHeight) - 0.5f * joystickSize;
+		drawDebugTexture(cmd, rightJoystickPos.x, rightJoystickPos.y, joystickSize.x, joystickSize.y, pVirtualJoystickTex, 1.0f, 1.0f, 1.0f);
+
+		joystickSize = float2(intSide);
+		leftJoystickCenter = pCameraController->getVirtualLeftJoystickPos();
+		leftJoystickPos = float2(leftJoystickCenter.getX() * mSettings.mWidth, leftJoystickCenter.getY() * mSettings.mHeight) - 0.5f * joystickSize;
+		drawDebugTexture(cmd, leftJoystickPos.x, leftJoystickPos.y, joystickSize.x, joystickSize.y, pVirtualJoystickTex, 1.0f, 1.0f, 1.0f);
+		rightJoystickCenter = pCameraController->getVirtualRightJoystickPos();
+		rightJoystickPos = float2(rightJoystickCenter.getX() * mSettings.mWidth, rightJoystickCenter.getY() * mSettings.mHeight) - 0.5f * joystickSize;
+		drawDebugTexture(cmd, rightJoystickPos.x, rightJoystickPos.y, joystickSize.x, joystickSize.y, pVirtualJoystickTex, 1.0f, 1.0f, 1.0f);
 #endif
-        
-		cmdUIDrawFrameTime(cmd, pUIManager, { 8, 15 }, "CPU ", gTimer.GetUSec(true) / 1000.0f);
+
+		drawDebugText(cmd, 8, 15, String::format("CPU %f ms", gTimer.GetUSecAverage() / 1000.0f), &gFrameTimeDraw);
 
 #ifndef METAL // Metal doesn't support GPU profilers
-		cmdUIDrawFrameTime(cmd, pUIManager, { 8, 30 }, "GPU ", (float)pGpuProfiler->mCumulativeTime * 1000.0f);
+		drawDebugText(cmd, 8, 40, String::format("GPU %f ms", (float)pGpuProfiler->mCumulativeTime * 1000.0f), &gFrameTimeDraw);
 #endif
 
-		cmdUIEndRender(cmd, pUIManager);
-		cmdEndRender(cmd, 1, &pRenderTarget, NULL);
+		gAppUI.Draw(cmd);
+
+		cmdBindRenderTargets(cmd, 0, NULL, NULL, NULL);
 
 		// Transition our texture to present state
 		barrier = { pRenderTarget->pTexture, RESOURCE_STATE_PRESENT };
 		cmdResourceBarrier(cmd, 0, NULL, 1, &barrier, true);
+		cmdEndGpuFrameProfile(cmd, pGpuProfiler);
 		endCmd(cmd);
 
 		queueSubmit(pGraphicsQueue, 1, &cmd, pRenderCompleteFence, 1, &pImageAcquiredSemaphore, 1, &pRenderCompleteSemaphore);
@@ -1047,16 +1077,52 @@ public:
 
 		Fence* pNextFence = pRenderCompleteFences[(gFrameIndex + 1) % gImageCount];
 		FenceStatus fenceStatus;
-		getFenceStatus(pNextFence, &fenceStatus);
+		getFenceStatus(pRenderer, pNextFence, &fenceStatus);
 		if (fenceStatus == FENCE_STATUS_INCOMPLETE)
 		{
-			waitForFences(pGraphicsQueue, 1, &pNextFence);
+			waitForFences(pGraphicsQueue, 1, &pNextFence, false);
 		}
 	}
 
 	String GetName()
 	{
-		return "06_BRDF";
+		return "UnitTest_06_BRDF";
+	}
+
+	bool addSwapChain()
+	{
+		SwapChainDesc swapChainDesc = {};
+		swapChainDesc.pWindow = pWindow;
+		swapChainDesc.mPresentQueueCount = 1;
+		swapChainDesc.ppPresentQueues = &pGraphicsQueue;
+		swapChainDesc.mWidth = mSettings.mWidth;
+		swapChainDesc.mHeight = mSettings.mHeight;
+		swapChainDesc.mImageCount = gImageCount;
+		swapChainDesc.mSampleCount = SAMPLE_COUNT_1;
+		swapChainDesc.mColorFormat = getRecommendedSwapchainFormat(true);
+		swapChainDesc.mEnableVsync = false;
+		::addSwapChain(pRenderer, &swapChainDesc, &pSwapChain);
+
+		return pSwapChain != NULL;
+	}
+
+	bool addDepthBuffer()
+	{
+		// Add depth buffer
+		RenderTargetDesc depthRT = {};
+		depthRT.mArraySize = 1;
+		depthRT.mClearValue = { 1.0f, 0 };
+		depthRT.mDepth = 1;
+		depthRT.mFormat = ImageFormat::D32F;
+		depthRT.mHeight = mSettings.mHeight;
+		depthRT.mSampleCount = SAMPLE_COUNT_1;
+		depthRT.mSampleQuality = 0;
+		depthRT.mType = RENDER_TARGET_TYPE_2D;
+		depthRT.mUsage = RENDER_TARGET_USAGE_DEPTH_STENCIL;
+		depthRT.mWidth = mSettings.mWidth;
+		addRenderTarget(pRenderer, &depthRT, &pDepthBuffer);
+
+		return pDepthBuffer != NULL;
 	}
 
 	void RecenterCameraView(float maxDistance, vec3 lookAt = vec3(0))
@@ -1077,6 +1143,7 @@ public:
 
 	// Camera controller functionality
 #if USE_CAMERACONTROLLER
+#if !defined(_DURANGO)
 	static bool cameraMouseMove(const RawMouseMoveEventData* data)
 	{
 		pCameraController->onMouseMove(data);
@@ -1107,6 +1174,7 @@ public:
         pCameraController->onTouchMove(data);
         return true;
     }
+#endif
 #endif
 #endif
 };

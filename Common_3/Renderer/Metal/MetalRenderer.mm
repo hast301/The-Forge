@@ -34,11 +34,13 @@
 #import <MetalKit/MetalKit.h>
 
 #import "../IRenderer.h"
-#include "../IMemoryAllocator.h"
+#include "MetalMemoryAllocator.h"
 #include "../../OS/Interfaces/IMemoryManager.h"
 #include "../../OS/Interfaces/ILogManager.h"
 
 #define MAX_BUFFER_BINDINGS 31
+
+extern void mtl_createShaderReflection(Renderer* pRenderer, Shader* shader, const uint8_t* shaderCode, uint32_t shaderSize, ShaderStage shaderStage, ShaderReflection* pOutReflection);
 
 #if defined(__cplusplus) && defined(RENDERER_CPP_NAMESPACE)
 namespace RENDERER_CPP_NAMESPACE {
@@ -277,7 +279,6 @@ namespace RENDERER_CPP_NAMESPACE {
     MTLVertexFormat util_to_mtl_vertex_format(const ImageFormat::Enum &format);
     MTLLoadAction util_to_mtl_load_action(const LoadActionType &loadActionType);
     
-    void util_bind_root_constant(Cmd* pCmd, DescriptorManager* pManager, const DescriptorInfo* descInfo, const DescriptorData* descData);
     void util_bind_argument_buffer(Cmd* pCmd, DescriptorManager* pManager, const DescriptorInfo* descInfo, const DescriptorData* descData);
     void util_end_current_encoders(Cmd* pCmd);
     bool util_sync_encoders(Cmd* pCmd, const CmdPoolType& newEncoderType);
@@ -414,11 +415,6 @@ namespace RENDERER_CPP_NAMESPACE {
         /// Array of flags to check whether a descriptor has already been bound.
         bool*                                                                           pBoundDescriptors;
         
-        /// Map that holds all the rootConstants bound by this descriptor manager for each root signature.
-        tinystl::unordered_map<uint32_t, tinystl::vector<Buffer*>>                      mRootConstantBuffers;
-        /// Map that holds the number of times each rootConstant is bound.
-        tinystl::unordered_map<uint32_t, uint32_t>                                      mRootConstantBindingCountMap;
-        
         /// Map that holds all the argument buffers bound by this descriptor manager for each root signature.
         tinystl::unordered_map<uint32_t, tinystl::pair<Buffer*, bool>>                  mArgumentBuffers;
     } DescriptorManager;
@@ -441,7 +437,6 @@ namespace RENDERER_CPP_NAMESPACE {
             
             // Create a DescriptorData structure for a default resource.
             pManager->pDescriptorDataArray[i].pName = "";
-            pManager->pDescriptorDataArray[i].mIndex = i;
             pManager->pDescriptorDataArray[i].mCount = 1;
             pManager->pDescriptorDataArray[i].mOffset = 0;
             
@@ -491,8 +486,6 @@ namespace RENDERER_CPP_NAMESPACE {
     void remove_descriptor_manager(Renderer* pRenderer, RootSignature* pRootSignature, DescriptorManager* pManager)
     {
         pManager->mArgumentBuffers.clear();
-        pManager->mRootConstantBindingCountMap.clear();
-        pManager->mRootConstantBuffers.clear();
         SAFE_FREE(pManager->pDescriptorDataArray);
         SAFE_FREE(pManager->pBoundDescriptors);
         SAFE_FREE(pManager);
@@ -540,7 +533,6 @@ namespace RENDERER_CPP_NAMESPACE {
         {
             DescriptorInfo* descInfo = &pManager->pRootSignature->pDescriptors[i];
 
-            pManager->pDescriptorDataArray[i].mIndex = 0;
             pManager->pDescriptorDataArray[i].mCount = 1;
             pManager->pDescriptorDataArray[i].mOffset = 0;
             
@@ -582,15 +574,24 @@ namespace RENDERER_CPP_NAMESPACE {
             }
             pManager->pBoundDescriptors[i] = false;
         }
-        pManager->mRootConstantBindingCountMap.clear();
     }
     
+    /************************************************************************/
+    // Get renderer shader macros
+    /************************************************************************/
+    // renderer shader macros allocated on stack
+    const RendererShaderDefinesDesc get_renderer_shaderdefines(Renderer* pRenderer)
+    {
+        RendererShaderDefinesDesc defineDesc = {NULL , 0};
+        return defineDesc;
+    }
+
     void cmdBindDescriptors(Cmd* pCmd, RootSignature* pRootSignature, uint32_t numDescriptors, DescriptorData* pDescParams)
     {
         ASSERT(pCmd);
         ASSERT(pRootSignature);
         
-        Renderer* pRenderer = pCmd->pCmdPool->pRenderer;
+        Renderer* pRenderer = pCmd->pRenderer;
         DescriptorManager* pManager = get_descriptor_manager(pRenderer, pRootSignature);
         
         // Compare the currently bound root signature with the root signature of the descriptor manager
@@ -620,10 +621,11 @@ namespace RENDERER_CPP_NAMESPACE {
             if (!pDesc)
                 continue;
             
+			const uint32_t arrayCount = max(1U, pParam->mCount);
+			
             // Replace the default DescriptorData by the new data pased into this function.
             pManager->pDescriptorDataArray[descIndex].pName = pParam->pName;
-            pManager->pDescriptorDataArray[descIndex].mIndex = pParam->mIndex;
-            pManager->pDescriptorDataArray[descIndex].mCount = pParam->mCount;
+            pManager->pDescriptorDataArray[descIndex].mCount = arrayCount;
             pManager->pDescriptorDataArray[descIndex].mOffset = pParam->mOffset;
             switch(pDesc->mDesc.type)
             {
@@ -648,10 +650,6 @@ namespace RENDERER_CPP_NAMESPACE {
                         return;
                     }
                     pManager->pDescriptorDataArray[descIndex].pRootConstant = pParam->pRootConstant;
-                    
-                    // Check if this rootConstant has previously been bound.
-                    if (pManager->mRootConstantBindingCountMap.find(hash).node) pManager->mRootConstantBindingCountMap[hash]++;
-                    else pManager->mRootConstantBindingCountMap[hash] = 0;
                     break;
                 case DESCRIPTOR_TYPE_UNIFORM_BUFFER:
                 case DESCRIPTOR_TYPE_RW_BUFFER:
@@ -663,7 +661,7 @@ namespace RENDERER_CPP_NAMESPACE {
                     pManager->pDescriptorDataArray[descIndex].ppBuffers = pParam->ppBuffers;
                     
                     // In case we're binding an argument buffer, signal that we need to re-encode the resources into the buffer.
-                    if(pParam->mCount > 1 && pManager->mArgumentBuffers.find(hash).node) pManager->mArgumentBuffers[hash].second = true;
+                    if(arrayCount > 1 && pManager->mArgumentBuffers.find(hash).node) pManager->mArgumentBuffers[hash].second = true;
                     
                     break;
                 default: break;
@@ -709,7 +707,12 @@ namespace RENDERER_CPP_NAMESPACE {
                             [pCmd->mtlComputeEncoder setSamplerState:descriptorData->ppSamplers[0]->mtlSamplerState atIndex:descriptorInfo->mDesc.reg];
                         break;
                     case DESCRIPTOR_TYPE_ROOT_CONSTANT:
-                        util_bind_root_constant(pCmd, pManager, descriptorInfo, descriptorData);
+                        if ((usedStagesMask & SHADER_STAGE_VERT) != 0)
+                            [pCmd->mtlRenderEncoder setVertexBytes:descriptorData->pRootConstant length:descriptorInfo->mDesc.size atIndex:descriptorInfo->mDesc.reg];
+                        if ((usedStagesMask & SHADER_STAGE_FRAG) != 0)
+                            [pCmd->mtlRenderEncoder setFragmentBytes:descriptorData->pRootConstant length:descriptorInfo->mDesc.size atIndex:descriptorInfo->mDesc.reg];
+                        if ((usedStagesMask & SHADER_STAGE_COMP) != 0)
+                            [pCmd->mtlComputeEncoder setBytes:descriptorData->pRootConstant length:descriptorInfo->mDesc.size atIndex:descriptorInfo->mDesc.reg];
                         break;
                     case DESCRIPTOR_TYPE_UNIFORM_BUFFER:
                     case DESCRIPTOR_TYPE_RW_BUFFER:
@@ -806,11 +809,34 @@ namespace RENDERER_CPP_NAMESPACE {
         bufferDesc.mStructStride = sizeof(uint32_t);
         addBuffer(pRenderer, &bufferDesc, &pDefaultBuffer);
         
-        addSampler(pRenderer, &pDefaultSampler);
+		SamplerDesc samplerDesc = {};
+		samplerDesc.mAddressU = ADDRESS_MODE_CLAMP_TO_BORDER;
+		samplerDesc.mAddressV = ADDRESS_MODE_CLAMP_TO_BORDER;
+		samplerDesc.mAddressW = ADDRESS_MODE_CLAMP_TO_BORDER;
+		addSampler(pRenderer, &samplerDesc, &pDefaultSampler);
         
-        addBlendState(&pDefaultBlendState, BC_ONE, BC_ZERO, BC_ONE, BC_ZERO, BM_ADD, BM_ADD, ALL, ALL);
-        addDepthState(pRenderer, &pDefaultDepthState, false, true);
-        addRasterizerState(&pDefaultRasterizerState, CullMode::CULL_MODE_BACK);
+		BlendStateDesc blendStateDesc = {};
+		blendStateDesc.mDstAlphaFactor = BC_ZERO;
+		blendStateDesc.mDstFactor = BC_ZERO;
+		blendStateDesc.mSrcAlphaFactor = BC_ONE;
+		blendStateDesc.mSrcFactor = BC_ONE;
+		blendStateDesc.mMask = ALL;
+		blendStateDesc.mRenderTargetMask = BLEND_STATE_TARGET_ALL;
+		addBlendState(pRenderer, &blendStateDesc, &pDefaultBlendState);
+
+		DepthStateDesc depthStateDesc = {};
+		depthStateDesc.mDepthFunc = CMP_LEQUAL;
+		depthStateDesc.mDepthTest = false;
+		depthStateDesc.mDepthWrite = true;
+		depthStateDesc.mStencilBackFunc = CMP_ALWAYS;
+		depthStateDesc.mStencilFrontFunc = CMP_ALWAYS;
+		depthStateDesc.mStencilReadMask = 0xFF;
+		depthStateDesc.mStencilWriteMask = 0xFF;
+		addDepthState(pRenderer, &depthStateDesc, &pDefaultDepthState);
+
+		RasterizerStateDesc rasterizerStateDesc = {};
+		rasterizerStateDesc.mCullMode = CULL_MODE_BACK;
+		addRasterizerState(pRenderer, &rasterizerStateDesc, &pDefaultRasterizerState);
     }
     
     void destroy_default_resources(Renderer* pRenderer)
@@ -847,20 +873,15 @@ namespace RENDERER_CPP_NAMESPACE {
         
         pRenderer->pName = (char*)conf_calloc(strlen(appName) + 1, sizeof(char));
         memcpy(pRenderer->pName, appName, strlen(appName));
-        
+
         // Copy settings
         memcpy(&(pRenderer->mSettings), settings, sizeof(*settings));
+		pRenderer->mSettings.mApi = RENDERER_API_METAL;
         
         // Initialize the Metal bits
         {
             // Get the systems default device.
             pRenderer->pDevice = MTLCreateSystemDefaultDevice();
-            
-            // Get the Metal Layer.
-            pRenderer->mMetalLayer = [CAMetalLayer layer];
-            pRenderer->mMetalLayer.framebufferOnly = YES;
-            pRenderer->mMetalLayer.drawsAsynchronously = TRUE;
-            pRenderer->mMetalLayer.presentsWithTransaction = FALSE;
             
             // Set the default GPU settings.
             pRenderer->mNumOfGPUs = 1;
@@ -888,12 +909,11 @@ namespace RENDERER_CPP_NAMESPACE {
         ASSERT(pRenderer);
         SAFE_FREE(pRenderer->pName);
         destroyAllocator(pRenderer->pResourceAllocator);
-        pRenderer->mMetalLayer = nil;
         pRenderer->pDevice = nil;
         SAFE_FREE(pRenderer);
     }
     
-    void addFence(Renderer* pRenderer, Fence** ppFence, uint64 mFenceValue)
+    void addFence(Renderer* pRenderer, Fence** ppFence)
     {
         ASSERT(pRenderer);
         ASSERT(pRenderer->pDevice != nil);
@@ -901,10 +921,8 @@ namespace RENDERER_CPP_NAMESPACE {
         Fence* pFence = (Fence*)conf_calloc(1, sizeof(*pFence));
         ASSERT(pFence);
         
-        pFence->pRenderer = pRenderer;
         pFence->pMtlSemaphore = dispatch_semaphore_create(0);
         pFence->mSubmitted = false;
-        pFence->mCompleted = false;
         
         *ppFence = pFence;
     }
@@ -931,7 +949,8 @@ namespace RENDERER_CPP_NAMESPACE {
         SAFE_FREE(pSemaphore);
     }
     
-    void addQueue(Renderer* pRenderer, QueueDesc* pQDesc, Queue** ppQueue){
+    void addQueue(Renderer* pRenderer, QueueDesc* pQDesc, Queue** ppQueue)
+	{
         ASSERT(pQDesc);
         
         Queue* pQueue = (Queue*)conf_calloc(1, sizeof(*pQueue));
@@ -945,13 +964,14 @@ namespace RENDERER_CPP_NAMESPACE {
         
         *ppQueue = pQueue;
     }
-    void removeQueue(Queue* pQueue){
+    void removeQueue(Queue* pQueue)
+	{
         ASSERT(pQueue);
         pQueue->mtlCommandQueue = nil;
         SAFE_FREE(pQueue);
     }
     
-    void addCmdPool(Renderer *pRenderer, Queue* pQueue, bool transient, CmdPool** ppCmdPool, CmdPoolDesc * pCmdPoolDesc)
+    void addCmdPool(Renderer *pRenderer, Queue* pQueue, bool transient, CmdPool** ppCmdPool)
     {
         ASSERT(pRenderer);
         ASSERT(pRenderer->pDevice != nil);
@@ -959,15 +979,7 @@ namespace RENDERER_CPP_NAMESPACE {
         CmdPool* pCmdPool = (CmdPool*)conf_calloc(1, sizeof(*pCmdPool));
         ASSERT(pCmdPool);
         
-        if (pCmdPoolDesc == NULL)
-        {
-            pCmdPool->mCmdPoolDesc = { pQueue->mQueueDesc.mType };
-        }
-        else
-        {
-            pCmdPool->mCmdPoolDesc = *pCmdPoolDesc;
-        }
-        pCmdPool->pRenderer = pRenderer;
+		pCmdPool->mCmdPoolDesc = { pQueue->mQueueDesc.mType };
         pCmdPool->pQueue = pQueue;
         
         *ppCmdPool = pCmdPool;
@@ -981,13 +993,20 @@ namespace RENDERER_CPP_NAMESPACE {
     void addCmd(CmdPool* pCmdPool, bool secondary, Cmd** ppCmd)
     {
         ASSERT(pCmdPool);
-        ASSERT(pCmdPool->pRenderer->pDevice != nil);
+        ASSERT(pCmdPool->pQueue->pRenderer->pDevice != nil);
         
         Cmd* pCmd = (Cmd*)conf_calloc(1, sizeof(*pCmd));
         ASSERT(pCmd);
         
+		pCmd->pRenderer = pCmdPool->pQueue->pRenderer;
         pCmd->pCmdPool = pCmdPool;
-        pCmd->mtlEncoderFence = [pCmdPool->pRenderer->pDevice newFence];
+        pCmd->mtlEncoderFence = [pCmd->pRenderer->pDevice newFence];
+		
+		if (pCmdPool->mCmdPoolDesc.mCmdPoolType == CMD_POOL_DIRECT)
+		{
+			pCmd->pBoundColorFormats = (uint32_t*)conf_calloc(MAX_RENDER_TARGET_ATTACHMENTS, sizeof(uint32_t));
+			pCmd->pBoundSrgbValues = (bool*)conf_calloc(MAX_RENDER_TARGET_ATTACHMENTS, sizeof(bool));
+		}
         
         *ppCmd = pCmd;
     }
@@ -996,6 +1015,13 @@ namespace RENDERER_CPP_NAMESPACE {
         ASSERT(pCmd);
         pCmd->mtlEncoderFence = nil;
         pCmd->mtlCommandBuffer = nil;
+		
+		if (pCmdPool->mCmdPoolDesc.mCmdPoolType == CMD_POOL_DIRECT)
+		{
+			SAFE_FREE(pCmd->pBoundColorFormats);
+			SAFE_FREE(pCmd->pBoundSrgbValues);
+		}
+		
         SAFE_FREE(pCmd);
     }
     
@@ -1044,9 +1070,8 @@ namespace RENDERER_CPP_NAMESPACE {
         // Set the view pixel format to match the swapchain's pixel format.
         pSwapChain->pMTKView.colorPixelFormat = util_to_mtl_pixel_format(pSwapChain->mDesc.mColorFormat, pSwapChain->mDesc.mSrgb);
         
-        // Create present command queues for the swapchain.
-        pSwapChain->presentCommandQueue = [pRenderer->pDevice newCommandQueue];
-        pSwapChain->presentCommandBuffer = [pSwapChain->presentCommandQueue commandBuffer];
+        // Create present command buffer for the swapchain.
+        pSwapChain->presentCommandBuffer = [pSwapChain->mDesc.ppPresentQueues[0]->mtlCommandQueue commandBuffer];
         
         // Create the swapchain RT descriptor.
         RenderTargetDesc descColor = {};
@@ -1063,8 +1088,9 @@ namespace RENDERER_CPP_NAMESPACE {
         descColor.mSampleQuality = 0;
         
         pSwapChain->ppSwapchainRenderTargets = (RenderTarget**)conf_calloc(pSwapChain->mDesc.mImageCount, sizeof(*pSwapChain->ppSwapchainRenderTargets));
-        for (uint32_t i = 0; i < pSwapChain->mDesc.mImageCount; ++i) {
-            addRenderTarget(pRenderer, &descColor, &pSwapChain->ppSwapchainRenderTargets[i], nil);
+        for (uint32_t i = 0; i < pSwapChain->mDesc.mImageCount; ++i)
+		{
+            addRenderTarget(pRenderer, &descColor, &pSwapChain->ppSwapchainRenderTargets[i]);
         }
         
         *ppSwapChain = pSwapChain;
@@ -1076,7 +1102,6 @@ namespace RENDERER_CPP_NAMESPACE {
         ASSERT(pSwapChain);
         
         pSwapChain->presentCommandBuffer = nil;
-        pSwapChain->presentCommandQueue = nil;
         
         for (uint32_t i = 0; i < pSwapChain->mDesc.mImageCount; ++i)
             removeRenderTarget(pRenderer, pSwapChain->ppSwapchainRenderTargets[i]);
@@ -1094,7 +1119,6 @@ namespace RENDERER_CPP_NAMESPACE {
         
         Buffer* pBuffer = (Buffer*)conf_calloc(1, sizeof(*pBuffer));
         ASSERT(pBuffer);
-        pBuffer->pRenderer = pRenderer;
         pBuffer->mDesc = *pDesc;
         
         // Align the buffer size to multiples of the dynamic uniform buffer minimum size
@@ -1147,7 +1171,7 @@ namespace RENDERER_CPP_NAMESPACE {
         add_texture(pRenderer, pDesc, ppTexture, false);
     }
     
-    void addRenderTarget(Renderer* pRenderer, const RenderTargetDesc* pDesc, RenderTarget** ppRenderTarget, void* pNativeHandle)
+    void addRenderTarget(Renderer* pRenderer, const RenderTargetDesc* pDesc, RenderTarget** ppRenderTarget)
     {
         ASSERT(pRenderer);
         ASSERT(pDesc);
@@ -1156,16 +1180,26 @@ namespace RENDERER_CPP_NAMESPACE {
         RenderTarget* pRenderTarget = (RenderTarget*)conf_calloc(1, sizeof(*pRenderTarget));
         pRenderTarget->mDesc = *pDesc;
         
-        TextureDesc rtDesc = {
-            TEXTURE_TYPE_2D, // TODO: Support 1D, 2D, 3D and Cube RTs.
-            pRenderTarget->mDesc.mFlags,
-            pRenderTarget->mDesc.mWidth, pRenderTarget->mDesc.mHeight, pRenderTarget->mDesc.mDepth,
-            pRenderTarget->mDesc.mBaseArrayLayer, pRenderTarget->mDesc.mArraySize,
-            pRenderTarget->mDesc.mBaseMipLevel, 1, // TODO: Support render to mip.
-            pRenderTarget->mDesc.mSampleCount, pRenderTarget->mDesc.mSampleQuality,
-            pRenderTarget->mDesc.mFormat, pRenderTarget->mDesc.mClearValue, TEXTURE_USAGE_SAMPLED_IMAGE,
-            RESOURCE_STATE_UNDEFINED, pNativeHandle, pRenderTarget->mDesc.mSrgb, false
-        };
+        TextureDesc rtDesc = {};
+        rtDesc.mType= TEXTURE_TYPE_2D; // TODO: Support 1D, 2D, 3D and Cube RTs.
+        rtDesc.mFlags= pRenderTarget->mDesc.mFlags;
+        rtDesc.mWidth= pRenderTarget->mDesc.mWidth;
+        rtDesc.mHeight= pRenderTarget->mDesc.mHeight;
+        rtDesc.mDepth= pRenderTarget->mDesc.mDepth;
+        rtDesc.mBaseArrayLayer= pRenderTarget->mDesc.mBaseArrayLayer;
+        rtDesc.mArraySize = pRenderTarget->mDesc.mArraySize;
+        rtDesc.mBaseMipLevel= pRenderTarget->mDesc.mBaseMipLevel;
+        rtDesc.mMipLevels = 1;
+        rtDesc.mSampleCount = pRenderTarget->mDesc.mSampleCount;
+        rtDesc.mSampleQuality= pRenderTarget->mDesc.mSampleQuality;
+        rtDesc.mFormat= pRenderTarget->mDesc.mFormat;
+        rtDesc.mClearValue= pRenderTarget->mDesc.mClearValue;
+        rtDesc.mUsage= TEXTURE_USAGE_SAMPLED_IMAGE;
+        rtDesc.mStartState= RESOURCE_STATE_UNDEFINED;
+        rtDesc.pNativeHandle = pDesc->pNativeHandle;
+        rtDesc.mSrgb= pRenderTarget->mDesc.mSrgb;
+        rtDesc.mHostVisible= false;
+        
 #ifndef TARGET_IOS
         add_texture(pRenderer, &rtDesc, &pRenderTarget->pTexture, true);
 #else
@@ -1197,23 +1231,24 @@ namespace RENDERER_CPP_NAMESPACE {
         SAFE_FREE(pRenderTarget);
     }
     
-    void addSampler(Renderer* pRenderer, Sampler** ppSampler, FilterType minFilter, FilterType magFilter, MipMapMode  mipMapMode, AddressMode addressU, AddressMode addressV, AddressMode addressW, float mipLosBias, float maxAnisotropy)
+    void addSampler(Renderer* pRenderer, const SamplerDesc* pDesc, Sampler** ppSampler)
     {
         ASSERT(pRenderer);
         ASSERT(pRenderer->pDevice != nil);
+		ASSERT(pDesc->mCompareFunc < MAX_COMPARE_MODES);
         
         Sampler* pSampler = (Sampler*)conf_calloc(1, sizeof(*pSampler));
         ASSERT(pSampler);
-        pSampler->pRenderer = pRenderer;
         
         MTLSamplerDescriptor* samplerDesc = [[MTLSamplerDescriptor alloc] init];
-        samplerDesc.minFilter = (minFilter == FILTER_NEAREST ? MTLSamplerMinMagFilterNearest : MTLSamplerMinMagFilterLinear);
-        samplerDesc.magFilter = (magFilter == FILTER_NEAREST ? MTLSamplerMinMagFilterNearest : MTLSamplerMinMagFilterLinear);
-        samplerDesc.mipFilter = (mipMapMode == MIPMAP_MODE_NEAREST ? MTLSamplerMipFilterNearest : MTLSamplerMipFilterLinear);
-        samplerDesc.maxAnisotropy = (maxAnisotropy==0 ? 1 : maxAnisotropy);  // 0 is not allowed in Metal
-        samplerDesc.sAddressMode = gMtlAddressModeTranslator[addressU];
-        samplerDesc.tAddressMode = gMtlAddressModeTranslator[addressV];
-        samplerDesc.rAddressMode = gMtlAddressModeTranslator[addressW];
+        samplerDesc.minFilter = (pDesc->mMinFilter == FILTER_NEAREST ? MTLSamplerMinMagFilterNearest : MTLSamplerMinMagFilterLinear);
+        samplerDesc.magFilter = (pDesc->mMagFilter == FILTER_NEAREST ? MTLSamplerMinMagFilterNearest : MTLSamplerMinMagFilterLinear);
+        samplerDesc.mipFilter = (pDesc->mMipMapMode == MIPMAP_MODE_NEAREST ? MTLSamplerMipFilterNearest : MTLSamplerMipFilterLinear);
+        samplerDesc.maxAnisotropy = (pDesc->mMaxAnisotropy == 0 ? 1 : pDesc->mMaxAnisotropy);  // 0 is not allowed in Metal
+        samplerDesc.sAddressMode = gMtlAddressModeTranslator[pDesc->mAddressU];
+        samplerDesc.tAddressMode = gMtlAddressModeTranslator[pDesc->mAddressV];
+        samplerDesc.rAddressMode = gMtlAddressModeTranslator[pDesc->mAddressW];
+		samplerDesc.compareFunction = gMtlComparisonFunctionTranslator[pDesc->mCompareFunc];
         
         pSampler->mtlSamplerState = [pRenderer->pDevice newSamplerStateWithDescriptor:samplerDesc];
         pSampler->mSamplerId = (++gSamplerIds << 8U) + util_pthread_to_uint64(Thread::GetCurrentThreadID());
@@ -1234,7 +1269,6 @@ namespace RENDERER_CPP_NAMESPACE {
         ASSERT(pRenderer->pDevice != nil);
         
         Shader* pShaderProgram = (Shader*)conf_calloc(1, sizeof(*pShaderProgram));
-        pShaderProgram->pRenderer = pRenderer;
         pShaderProgram->mStages = pDesc->mStages;
         
         uint32_t shaderReflectionCounter = 0;
@@ -1303,7 +1337,7 @@ namespace RENDERER_CPP_NAMESPACE {
                 
                 if (error)
                 {
-                    NSLog(@ "%s %@", shader_name, error);
+                    LOGERRORF("Couldn't load shader %s with the following error:\n %s",shader_name, [[error localizedDescription] UTF8String]);
                     error = 0;  //  error string is an autorelease object.
                 }
                 
@@ -1315,7 +1349,7 @@ namespace RENDERER_CPP_NAMESPACE {
                     *compiled_code = function;
                 }
                 
-                createShaderReflection(pShaderProgram, (const uint8_t*)source.c_str(), source.size(), stage_mask, &stageReflections[shaderReflectionCounter++]);
+                mtl_createShaderReflection(pRenderer, pShaderProgram, (const uint8_t*)source.c_str(), (uint32_t)source.size(), stage_mask, &stageReflections[shaderReflectionCounter++]);
             }
         }
         
@@ -1324,7 +1358,7 @@ namespace RENDERER_CPP_NAMESPACE {
         *ppShaderProgram = pShaderProgram;
     }
     
-    void addShader(Renderer* pRenderer, const BinaryShaderDesc* pDesc, Shader** ppShaderProgram)
+    void addShaderBinary(Renderer* pRenderer, const BinaryShaderDesc* pDesc, Shader** ppShaderProgram)
     {
         ASSERT(pRenderer);
         ASSERT(pDesc && pDesc->mStages);
@@ -1332,7 +1366,7 @@ namespace RENDERER_CPP_NAMESPACE {
         
         Shader* pShaderProgram = (Shader*)conf_calloc(1, sizeof(*pShaderProgram));
         ASSERT(pShaderProgram);
-        pShaderProgram->pRenderer = pRenderer;
+		
         pShaderProgram->mStages = pDesc->mStages;
         
         uint32_t reflectionCount = 0;
@@ -1362,7 +1396,7 @@ namespace RENDERER_CPP_NAMESPACE {
                 }
                 
                 // Create a MTLLibrary from bytecode.
-                dispatch_data_t byteCode = dispatch_data_create(pStage->mByteCode.data(), pStage->mByteCode.size(), nil, DISPATCH_DATA_DESTRUCTOR_DEFAULT);
+                dispatch_data_t byteCode = dispatch_data_create(pStage->pByteCode, pStage->mByteCodeSize, nil, DISPATCH_DATA_DESTRUCTOR_DEFAULT);
                 id<MTLLibrary> lib = [pRenderer->pDevice newLibraryWithData:byteCode error:nil];
                 
                 // Create a MTLFunction from the loaded MTLLibrary.
@@ -1370,7 +1404,7 @@ namespace RENDERER_CPP_NAMESPACE {
                 id<MTLFunction> function = [lib newFunctionWithName:entryPointNStr];
                 *compiled_code = function;
                 
-                createShaderReflection(pShaderProgram, (const uint8_t*)pStage->mSource.c_str(), pStage->mSource.size(), stage_mask, &pShaderProgram->mReflection.mStageReflections[reflectionCount++]);
+                mtl_createShaderReflection(pRenderer, pShaderProgram, (const uint8_t*)pStage->mSource.c_str(), (uint32_t)pStage->mSource.size(), stage_mask, &pShaderProgram->mReflection.mStageReflections[reflectionCount++]);
             }
         }
         
@@ -1398,7 +1432,7 @@ namespace RENDERER_CPP_NAMESPACE {
         SAFE_FREE(pShaderProgram);
     }
     
-    void addRootSignature(Renderer* pRenderer, uint32_t numShaders, Shader* const* ppShaders, RootSignature** ppRootSignature, const RootSignatureDesc* pRootDesc)
+    void addRootSignature(Renderer* pRenderer, const RootSignatureDesc* pRootsignatureDesc, RootSignature** ppRootSignature)
     {
         ASSERT(pRenderer);
         ASSERT(pRenderer->pDevice != nil);
@@ -1410,9 +1444,9 @@ namespace RENDERER_CPP_NAMESPACE {
         
         // Collect all unique shader resources in the given shaders
         // Resources are parsed by name (two resources named "XYZ" in two shaders will be considered the same resource)
-        for (uint32_t sh = 0; sh < numShaders; ++sh)
+        for (uint32_t sh = 0; sh < pRootsignatureDesc->mShaderCount; ++sh)
         {
-            PipelineReflection const* pReflection = &ppShaders[sh]->mReflection;
+            PipelineReflection const* pReflection = &pRootsignatureDesc->ppShaders[sh]->mReflection;
             
             if (pReflection->mShaderStages & SHADER_STAGE_COMP)
                 pRootSignature->mPipelineType = PIPELINE_TYPE_COMPUTE;
@@ -1427,20 +1461,20 @@ namespace RENDERER_CPP_NAMESPACE {
                 tinystl::unordered_hash_node<uint32_t, uint32_t>* pNode = pRootSignature->pDescriptorNameToIndexMap.find(tinystl::hash(pRes->name)).node;
                 if (!pNode)
                 {
-                    pRootSignature->pDescriptorNameToIndexMap.insert({ tinystl::hash(pRes->name), shaderResources.getCount() });
+                    pRootSignature->pDescriptorNameToIndexMap.insert({ tinystl::hash(pRes->name), (uint32_t)shaderResources.size() });
                     shaderResources.emplace_back(pRes);
                 }
             }
         }
         
-        if (shaderResources.getCount())
+        if ((uint32_t)shaderResources.size())
         {
-            pRootSignature->mDescriptorCount = shaderResources.getCount();
+            pRootSignature->mDescriptorCount = (uint32_t)shaderResources.size();
             pRootSignature->pDescriptors = (DescriptorInfo*)conf_calloc(pRootSignature->mDescriptorCount, sizeof(DescriptorInfo));
         }
         
         // Fill the descriptor array to be stored in the root signature
-        for (uint32_t i = 0; i < shaderResources.getCount(); ++i)
+        for (uint32_t i = 0; i < (uint32_t)shaderResources.size(); ++i)
         {
             DescriptorInfo* pDesc = &pRootSignature->pDescriptors[i];
             ShaderResource const* pRes = shaderResources[i];
@@ -1491,6 +1525,17 @@ namespace RENDERER_CPP_NAMESPACE {
         
         SAFE_FREE(pRootSignature);
     }
+	
+		uint32_t util_calculate_vertex_layout_stride(const VertexLayout* pVertexLayout)
+		{
+			ASSERT(pVertexLayout);
+			
+			uint32_t result = 0;
+			for (uint32_t i = 0; i < pVertexLayout->mAttribCount; ++i) {
+				result += calculateImageFormatStride(pVertexLayout->mAttribs[i].mFormat);
+			}
+			return result;
+		}
     
     void addPipeline(Renderer* pRenderer, const GraphicsPipelineDesc* pDesc, Pipeline** ppPipeline)
     {
@@ -1506,15 +1551,12 @@ namespace RENDERER_CPP_NAMESPACE {
         memcpy(&(pPipeline->mGraphics), pDesc, sizeof(*pDesc));
         pPipeline->mType = PIPELINE_TYPE_GRAPHICS;
         pPipeline->pShader = pPipeline->mGraphics.pShaderProgram;
-        pPipeline->pRenderer = pRenderer;
         
         // create metal pipeline descriptor
         MTLRenderPipelineDescriptor *renderPipelineDesc = [[MTLRenderPipelineDescriptor alloc] init];
         renderPipelineDesc.vertexFunction = pDesc->pShaderProgram->mtlVertexShader;
         renderPipelineDesc.fragmentFunction = pDesc->pShaderProgram->mtlFragmentShader;
-        if(pDesc->mRenderTargetCount > 0) renderPipelineDesc.sampleCount = pDesc->ppRenderTargets[0]->pTexture->mDesc.mSampleCount;
-        else renderPipelineDesc.sampleCount = pDesc->pDepthStencil->pTexture->mDesc.mSampleCount;
-        
+        renderPipelineDesc.sampleCount = pDesc->mSampleCount;
         
         // add vertex layout to descriptor
         if (pPipeline->mGraphics.pVertexLayout != nil)
@@ -1527,7 +1569,7 @@ namespace RENDERER_CPP_NAMESPACE {
                 renderPipelineDesc.vertexDescriptor.attributes[i].bufferIndex = attrib->mBinding;
                 renderPipelineDesc.vertexDescriptor.attributes[i].format = util_to_mtl_vertex_format(attrib->mFormat);
             }
-            renderPipelineDesc.vertexDescriptor.layouts[0].stride = calculateVertexLayoutStride(pPipeline->mGraphics.pVertexLayout);
+            renderPipelineDesc.vertexDescriptor.layouts[0].stride = util_calculate_vertex_layout_stride(pPipeline->mGraphics.pVertexLayout);
             renderPipelineDesc.vertexDescriptor.layouts[0].stepRate = 1;
             renderPipelineDesc.vertexDescriptor.layouts[0].stepFunction = pPipeline->pShader->mtlVertexShader.patchType != MTLPatchTypeNone ? MTLVertexStepFunctionPerPatchControlPoint : MTLVertexStepFunctionPerVertex;
         }
@@ -1548,7 +1590,7 @@ namespace RENDERER_CPP_NAMESPACE {
         const BlendState* blendState = pDesc->pBlendState ? pDesc->pBlendState : pDefaultBlendState;
         for (uint32_t i=0; i<pDesc->mRenderTargetCount; i++)
         {
-            renderPipelineDesc.colorAttachments[i].pixelFormat = pDesc->ppRenderTargets[i]->pTexture->mtlPixelFormat;
+            renderPipelineDesc.colorAttachments[i].pixelFormat = util_to_mtl_pixel_format(pDesc->pColorFormats[i], pDesc->pSrgbValues[i]);
             
             // set blend state
             bool hasBlendState = (blendState!=nil);
@@ -1565,13 +1607,13 @@ namespace RENDERER_CPP_NAMESPACE {
         }
         
         // assign pixel format form depth attachment
-        if (pDesc->pDepthStencil !=nil )
+        if (pDesc->mDepthStencilFormat != ImageFormat::NONE )
         {
-            renderPipelineDesc.depthAttachmentPixelFormat = pDesc->pDepthStencil->pTexture->mtlPixelFormat;
+            renderPipelineDesc.depthAttachmentPixelFormat = util_to_mtl_pixel_format(pDesc->mDepthStencilFormat, false);
 #ifndef TARGET_IOS
             if(renderPipelineDesc.depthAttachmentPixelFormat == MTLPixelFormatDepth24Unorm_Stencil8) renderPipelineDesc.stencilAttachmentPixelFormat = renderPipelineDesc.depthAttachmentPixelFormat;
 #else
-            if(pDesc->pDepthStencil->pStencil) renderPipelineDesc.stencilAttachmentPixelFormat = pDesc->pDepthStencil->pStencil->mtlPixelFormat;
+            if(pDesc->mDepthStencilFormat == ImageFormat::D24S8) renderPipelineDesc.stencilAttachmentPixelFormat = MTLPixelFormatStencil8;
 #endif
         }
         
@@ -1592,13 +1634,13 @@ namespace RENDERER_CPP_NAMESPACE {
             renderPipelineDesc.maxTessellationFactor = 64;
 #endif
         }
-        
+			
         // create pipeline from descriptor
         NSError *error = nil;
         pPipeline->mtlRenderPipelineState = [pRenderer->pDevice newRenderPipelineStateWithDescriptor:renderPipelineDesc options:MTLPipelineOptionNone reflection:nil error:&error];
         if (!pPipeline->mtlRenderPipelineState)
         {
-            NSLog(@"Failed to create render pipeline state, error %@", error);
+            LOGERRORF("Failed to create render pipeline state, error:\n%s", [[error localizedDescription] UTF8String]);
             return;
         }
         
@@ -1619,13 +1661,12 @@ namespace RENDERER_CPP_NAMESPACE {
         memcpy(&(pPipeline->mCompute), pDesc, sizeof(*pDesc));
         pPipeline->mType = PIPELINE_TYPE_COMPUTE;
         pPipeline->pShader = pPipeline->mCompute.pShaderProgram;
-        pPipeline->pRenderer = pRenderer;
         
         NSError *error = nil;
         pPipeline->mtlComputePipelineState = [pRenderer->pDevice newComputePipelineStateWithFunction:pDesc->pShaderProgram->mtlComputeShader error:nil];
         if (!pPipeline->mtlComputePipelineState)
         {
-            NSLog(@"Failed to create compute pipeline state, error %@", error);
+            LOGERRORF("Failed to create compute pipeline state, error:\n%s", [[error localizedDescription] UTF8String]);
             SAFE_FREE(pPipeline);
             return;
         }
@@ -1641,35 +1682,31 @@ namespace RENDERER_CPP_NAMESPACE {
         SAFE_FREE(pPipeline);
     }
     
-    void addBlendState(BlendState** ppBlendState,
-                       BlendConstant srcFactor, BlendConstant destFactor,
-                       BlendConstant srcAlphaFactor, BlendConstant destAlphaFactor,
-                       BlendMode blendMode, BlendMode blendAlphaMode,
-                       const int mask, const int MRTRenderTargetNumber, const bool alphaToCoverage)
+    void addBlendState(Renderer* pRenderer, const BlendStateDesc* pDesc, BlendState** ppBlendState)
     {
-        ASSERT(srcFactor < BlendConstant::MAX_BLEND_CONSTANTS);
-        ASSERT(destFactor < BlendConstant::MAX_BLEND_CONSTANTS);
-        ASSERT(srcAlphaFactor < BlendConstant::MAX_BLEND_CONSTANTS);
-        ASSERT(destAlphaFactor < BlendConstant::MAX_BLEND_CONSTANTS);
-        ASSERT(blendMode < BlendMode::MAX_BLEND_MODES);
-        ASSERT(blendAlphaMode < BlendMode::MAX_BLEND_MODES);
+        ASSERT(pDesc->mSrcFactor < BlendConstant::MAX_BLEND_CONSTANTS);
+        ASSERT(pDesc->mDstFactor < BlendConstant::MAX_BLEND_CONSTANTS);
+        ASSERT(pDesc->mSrcAlphaFactor < BlendConstant::MAX_BLEND_CONSTANTS);
+        ASSERT(pDesc->mDstAlphaFactor < BlendConstant::MAX_BLEND_CONSTANTS);
+        ASSERT(pDesc->mBlendMode < BlendMode::MAX_BLEND_MODES);
+        ASSERT(pDesc->mBlendAlphaMode < BlendMode::MAX_BLEND_MODES);
         
         BlendState blendState = {};
         
         // Go over each RT blend state.
         for(int i = 0; i < MAX_RENDER_TARGET_ATTACHMENTS; ++i)
         {
-            if(MRTRenderTargetNumber & (1 << i))
+            if(pDesc->mRenderTargetMask & (1 << i))
             {
-                blendState.blendStatePerRenderTarget[i].srcFactor = gMtlBlendConstantTranslator[srcFactor];
-                blendState.blendStatePerRenderTarget[i].destFactor = gMtlBlendConstantTranslator[destFactor];
-                blendState.blendStatePerRenderTarget[i].srcAlphaFactor = gMtlBlendConstantTranslator[srcAlphaFactor];
-                blendState.blendStatePerRenderTarget[i].destAlphaFactor = gMtlBlendConstantTranslator[destAlphaFactor];
-                blendState.blendStatePerRenderTarget[i].blendMode = gMtlBlendOpTranslator[blendMode];
-                blendState.blendStatePerRenderTarget[i].blendAlphaMode = gMtlBlendOpTranslator[blendAlphaMode];
+                blendState.blendStatePerRenderTarget[i].srcFactor = gMtlBlendConstantTranslator[pDesc->mSrcFactor];
+                blendState.blendStatePerRenderTarget[i].destFactor = gMtlBlendConstantTranslator[pDesc->mDstFactor];
+                blendState.blendStatePerRenderTarget[i].srcAlphaFactor = gMtlBlendConstantTranslator[pDesc->mSrcAlphaFactor];
+                blendState.blendStatePerRenderTarget[i].destAlphaFactor = gMtlBlendConstantTranslator[pDesc->mDstAlphaFactor];
+                blendState.blendStatePerRenderTarget[i].blendMode = gMtlBlendOpTranslator[pDesc->mBlendMode];
+                blendState.blendStatePerRenderTarget[i].blendAlphaMode = gMtlBlendOpTranslator[pDesc->mBlendAlphaMode];
             }
         }
-        blendState.alphaToCoverage = alphaToCoverage;
+        blendState.alphaToCoverage = pDesc->mAlphaToCoverage;
         
         *ppBlendState = (BlendState*)conf_malloc(sizeof(blendState));
         memcpy(*ppBlendState, &blendState, sizeof(blendState));
@@ -1681,45 +1718,33 @@ namespace RENDERER_CPP_NAMESPACE {
         SAFE_FREE(pBlendState);
     }
     
-    void addDepthState(Renderer* pRenderer, DepthState** ppDepthState, const bool depthTest, const bool depthWrite,
-       const CompareMode depthFunc /*= CompareMode::CMP_LEQUAL*/,
-       const bool stencilTest /*= false*/,
-       const uint8 stencilReadMask /*= 0xFF*/,
-       const uint8 stencilWriteMask /*= 0xFF*/,
-       const CompareMode stencilFrontFunc /*= CompareMode::CMP_ALWAYS*/,
-       const StencilOp stencilFrontFail /*= StencilOp::STENCIL_OP_KEEP*/,
-       const StencilOp depthFrontFail /*= StencilOp::STENCIL_OP_KEEP*/,
-       const StencilOp stencilFrontPass /*= StencilOp::STENCIL_OP_KEEP*/,
-       const CompareMode stencilBackFunc /*= CompareMode::CMP_ALWAYS*/,
-       const StencilOp stencilBackFail /*= StencilOp::STENCIL_OP_KEEP*/,
-       const StencilOp depthBackFail /*= StencilOp::STENCIL_OP_KEEP*/,
-       const StencilOp stencilBackPass /*= StencilOp::STENCIL_OP_KEEP*/)
+    void addDepthState(Renderer* pRenderer, const DepthStateDesc* pDesc, DepthState** ppDepthState)
     {
-        ASSERT(depthFunc < CompareMode::MAX_COMPARE_MODES);
-        ASSERT(stencilFrontFunc < CompareMode::MAX_COMPARE_MODES);
-        ASSERT(stencilFrontFail < StencilOp::MAX_STENCIL_OPS);
-        ASSERT(depthFrontFail < StencilOp::MAX_STENCIL_OPS);
-        ASSERT(stencilFrontPass < StencilOp::MAX_STENCIL_OPS);
-        ASSERT(stencilBackFunc < CompareMode::MAX_COMPARE_MODES);
-        ASSERT(stencilBackFail < StencilOp::MAX_STENCIL_OPS);
-        ASSERT(depthBackFail < StencilOp::MAX_STENCIL_OPS);
-        ASSERT(stencilBackPass < StencilOp::MAX_STENCIL_OPS);
+        ASSERT(pDesc->mDepthFunc < CompareMode::MAX_COMPARE_MODES);
+        ASSERT(pDesc->mStencilFrontFunc < CompareMode::MAX_COMPARE_MODES);
+        ASSERT(pDesc->mStencilFrontFail < StencilOp::MAX_STENCIL_OPS);
+        ASSERT(pDesc->mDepthFrontFail < StencilOp::MAX_STENCIL_OPS);
+        ASSERT(pDesc->mStencilFrontPass < StencilOp::MAX_STENCIL_OPS);
+        ASSERT(pDesc->mStencilBackFunc < CompareMode::MAX_COMPARE_MODES);
+        ASSERT(pDesc->mStencilBackFail < StencilOp::MAX_STENCIL_OPS);
+        ASSERT(pDesc->mDepthBackFail < StencilOp::MAX_STENCIL_OPS);
+        ASSERT(pDesc->mStencilBackPass < StencilOp::MAX_STENCIL_OPS);
         
         MTLDepthStencilDescriptor* descriptor = [[MTLDepthStencilDescriptor alloc] init];
-        descriptor.depthCompareFunction = gMtlComparisonFunctionTranslator[depthFunc];
-        descriptor.depthWriteEnabled = depthWrite;
-        descriptor.backFaceStencil.stencilCompareFunction = gMtlComparisonFunctionTranslator[stencilBackFunc];
-        descriptor.backFaceStencil.depthFailureOperation = gMtlStencilOpTranslator[depthBackFail];
-        descriptor.backFaceStencil.stencilFailureOperation = gMtlStencilOpTranslator[stencilBackFail];
-        descriptor.backFaceStencil.depthStencilPassOperation = gMtlStencilOpTranslator[stencilBackPass];
-        descriptor.backFaceStencil.readMask = stencilReadMask;
-        descriptor.backFaceStencil.writeMask = stencilWriteMask;
-        descriptor.frontFaceStencil.stencilCompareFunction = gMtlComparisonFunctionTranslator[stencilFrontFunc];
-        descriptor.frontFaceStencil.depthFailureOperation = gMtlStencilOpTranslator[depthFrontFail];
-        descriptor.frontFaceStencil.stencilFailureOperation = gMtlStencilOpTranslator[stencilFrontFail];
-        descriptor.frontFaceStencil.depthStencilPassOperation = gMtlStencilOpTranslator[stencilFrontPass];
-        descriptor.frontFaceStencil.readMask = stencilReadMask;
-        descriptor.frontFaceStencil.writeMask = stencilWriteMask;
+        descriptor.depthCompareFunction = gMtlComparisonFunctionTranslator[pDesc->mDepthFunc];
+        descriptor.depthWriteEnabled = pDesc->mDepthWrite;
+        descriptor.backFaceStencil.stencilCompareFunction = gMtlComparisonFunctionTranslator[pDesc->mStencilBackFunc];
+        descriptor.backFaceStencil.depthFailureOperation = gMtlStencilOpTranslator[pDesc->mDepthBackFail];
+        descriptor.backFaceStencil.stencilFailureOperation = gMtlStencilOpTranslator[pDesc->mStencilBackFail];
+        descriptor.backFaceStencil.depthStencilPassOperation = gMtlStencilOpTranslator[pDesc->mStencilBackPass];
+        descriptor.backFaceStencil.readMask = pDesc->mStencilReadMask;
+        descriptor.backFaceStencil.writeMask = pDesc->mStencilWriteMask;
+        descriptor.frontFaceStencil.stencilCompareFunction = gMtlComparisonFunctionTranslator[pDesc->mStencilFrontFunc];
+        descriptor.frontFaceStencil.depthFailureOperation = gMtlStencilOpTranslator[pDesc->mDepthFrontFail];
+        descriptor.frontFaceStencil.stencilFailureOperation = gMtlStencilOpTranslator[pDesc->mStencilFrontFail];
+        descriptor.frontFaceStencil.depthStencilPassOperation = gMtlStencilOpTranslator[pDesc->mStencilFrontPass];
+        descriptor.frontFaceStencil.readMask = pDesc->mStencilReadMask;
+        descriptor.frontFaceStencil.writeMask = pDesc->mStencilWriteMask;
         
         DepthState* pDepthState = (DepthState*)conf_calloc(1, sizeof(*pDepthState));
         pDepthState->mtlDepthState = [pRenderer->pDevice newDepthStencilStateWithDescriptor:descriptor];
@@ -1734,30 +1759,24 @@ namespace RENDERER_CPP_NAMESPACE {
         SAFE_FREE(pDepthState);
     }
     
-    void addRasterizerState(RasterizerState** ppRasterizerState,
-        const CullMode cullMode,
-        const int depthBias /*= 0*/,
-        const float slopeScaledDepthBias /*= 0*/,
-        const FillMode fillMode /*= FillMode::FILL_MODE_SOLID*/,
-        const bool multiSample /*= false*/,
-        const bool scissor /*= false*/)
+    void addRasterizerState(Renderer* pRenderer, const RasterizerStateDesc* pDesc, RasterizerState** ppRasterizerState)
     {
-        ASSERT(fillMode < FillMode::MAX_FILL_MODES);
-        ASSERT(cullMode < CullMode::MAX_CULL_MODES);
+        ASSERT(pDesc->mFillMode < FillMode::MAX_FILL_MODES);
+        ASSERT(pDesc->mCullMode < CullMode::MAX_CULL_MODES);
         
         RasterizerState rasterizerState = {};
         
         rasterizerState.cullMode = MTLCullModeNone;
-        if (cullMode == CULL_MODE_BACK)
+        if (pDesc->mCullMode == CULL_MODE_BACK)
             rasterizerState.cullMode = MTLCullModeBack;
-        else if (cullMode == CULL_MODE_FRONT)
+        else if (pDesc->mCullMode == CULL_MODE_FRONT)
             rasterizerState.cullMode = MTLCullModeFront;
         
-        rasterizerState.fillMode = (fillMode == FILL_MODE_SOLID ? MTLTriangleFillModeFill : MTLTriangleFillModeLines);
-        rasterizerState.depthBias = depthBias;
-        rasterizerState.depthBiasSlopeFactor = slopeScaledDepthBias;
-        rasterizerState.scissorEnable = scissor;
-        rasterizerState.multisampleEnable = multiSample;
+        rasterizerState.fillMode = (pDesc->mFillMode == FILL_MODE_SOLID ? MTLTriangleFillModeFill : MTLTriangleFillModeLines);
+        rasterizerState.depthBias = pDesc->mDepthBias;
+        rasterizerState.depthBiasSlopeFactor = pDesc->mSlopeScaledDepthBias;
+        rasterizerState.scissorEnable = pDesc->mScissor;
+        rasterizerState.multisampleEnable = pDesc->mMultiSample;
         
         *ppRasterizerState = (RasterizerState*)conf_malloc(sizeof(rasterizerState));
         memcpy(*ppRasterizerState, &rasterizerState, sizeof(rasterizerState));
@@ -1811,7 +1830,7 @@ namespace RENDERER_CPP_NAMESPACE {
     // -------------------------------------------------------------------------------------------------
     // Buffer functions
     // -------------------------------------------------------------------------------------------------
-    void mapBuffer(Renderer* pRenderer, Buffer* pBuffer, ReadRange* pRange = NULL)
+    void mapBuffer(Renderer* pRenderer, Buffer* pBuffer, ReadRange* pRange)
     {
         ASSERT(pBuffer->mDesc.mMemoryUsage != RESOURCE_MEMORY_USAGE_GPU_ONLY && "Trying to map non-cpu accessible resource");
         pBuffer->pCpuMappedAddress = pBuffer->mtlBuffer.contents;
@@ -1842,6 +1861,22 @@ namespace RENDERER_CPP_NAMESPACE {
     
     void endCmd(Cmd* pCmd)
     {
+		if (pCmd->mRenderPassActive)
+		{
+			// Reset the bound resources flags for the current root signature's descriptor manager.
+			const tinystl::unordered_hash_node<ThreadID, DescriptorManager*>* pNode = pCmd->pBoundRootSignature->pDescriptorManagerMap.find(Thread::GetCurrentThreadID()).node;
+			if (pNode)
+				reset_bound_resources(pNode->second);
+
+			@autoreleasepool {
+				util_end_current_encoders(pCmd);
+			}			
+		}
+		
+		pCmd->mRenderPassActive = false;
+		pCmd->mBoundRenderTargetCount = 0;
+		pCmd->mBoundDepthStencilFormat = ImageFormat::NONE;
+		
         // Reset the bound resources flags for the current root signature's descriptor manager.
         if(pCmd->pBoundRootSignature)
         {
@@ -1850,10 +1885,28 @@ namespace RENDERER_CPP_NAMESPACE {
         }
     }
     
-    void cmdBeginRender(Cmd* pCmd, uint32_t renderTargetCount, RenderTarget** ppRenderTargets, RenderTarget* pDepthStencil, const LoadActionsDesc* pLoadActions)
+    void cmdBindRenderTargets(Cmd* pCmd, uint32_t renderTargetCount, RenderTarget** ppRenderTargets, RenderTarget* pDepthStencil, const LoadActionsDesc* pLoadActions)
     {
         ASSERT(pCmd);
-        ASSERT(ppRenderTargets || pDepthStencil);
+        
+		if (pCmd->mRenderPassActive)
+		{
+			// Reset the bound resources flags for the current root signature's descriptor manager.
+			const tinystl::unordered_hash_node<ThreadID, DescriptorManager*>* pNode = pCmd->pBoundRootSignature->pDescriptorManagerMap.find(Thread::GetCurrentThreadID()).node;
+			if (pNode)
+				reset_bound_resources(pNode->second);
+
+			@autoreleasepool {
+				util_end_current_encoders(pCmd);
+			}
+			
+			pCmd->mRenderPassActive = false;
+			pCmd->mBoundRenderTargetCount = 0;
+			pCmd->mBoundDepthStencilFormat = ImageFormat::NONE;
+		}
+		
+		if(!renderTargetCount && !pDepthStencil)
+			return;
         
         @autoreleasepool {
             pCmd->pRenderPassDesc = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -1884,6 +1937,9 @@ namespace RENDERER_CPP_NAMESPACE {
                     const ClearValue& clearValue = pLoadActions->mClearColorValues[i];
                     pCmd->pRenderPassDesc.colorAttachments[i].clearColor = MTLClearColorMake(clearValue.r, clearValue.g, clearValue.b, clearValue.a);
                 }
+				
+				pCmd->pBoundColorFormats[i] = ppRenderTargets[i]->mDesc.mFormat;
+				pCmd->pBoundSrgbValues[i] = ppRenderTargets[i]->mDesc.mSrgb;
             }
             
             if (pDepthStencil != nil)
@@ -1937,6 +1993,8 @@ namespace RENDERER_CPP_NAMESPACE {
                     pCmd->pRenderPassDesc.depthAttachment.clearDepth = pLoadActions->mClearDepth.depth;
                     if(isStencilEnabled) pCmd->pRenderPassDesc.stencilAttachment.clearStencil = 0;
                 }
+				
+				pCmd->mBoundDepthStencilFormat = pDepthStencil->mDesc.mFormat;
             }
             else
             {
@@ -1944,7 +2002,14 @@ namespace RENDERER_CPP_NAMESPACE {
                 pCmd->pRenderPassDesc.stencilAttachment.loadAction = MTLLoadActionDontCare;
                 pCmd->pRenderPassDesc.depthAttachment.storeAction = MTLStoreActionDontCare;
                 pCmd->pRenderPassDesc.stencilAttachment.storeAction = MTLStoreActionDontCare;
+				pCmd->mBoundDepthStencilFormat = ImageFormat::NONE;
             }
+			
+			SampleCount sampleCount = renderTargetCount ? ppRenderTargets[0]->mDesc.mSampleCount : pDepthStencil->mDesc.mSampleCount;
+			pCmd->mBoundWidth = renderTargetCount ? ppRenderTargets[0]->mDesc.mWidth : pDepthStencil->mDesc.mWidth;
+			pCmd->mBoundHeight = renderTargetCount ? ppRenderTargets[0]->mDesc.mHeight : pDepthStencil->mDesc.mHeight;
+			pCmd->mBoundSampleCount = sampleCount;
+			pCmd->mBoundRenderTargetCount = renderTargetCount;
             
             bool switchedEncoders = util_sync_encoders(pCmd, CMD_POOL_DIRECT); // Check if we need to sync different types of encoders (only on direct cmds).
             util_end_current_encoders(pCmd);
@@ -1952,19 +2017,7 @@ namespace RENDERER_CPP_NAMESPACE {
             if(switchedEncoders) [pCmd->mtlRenderEncoder waitForFence:pCmd->mtlEncoderFence beforeStages:MTLRenderStageVertex];
             
             [pCmd->mtlRenderEncoder setFrontFacingWinding:MTLWindingCounterClockwise];
-        }
-    }
-    
-    void cmdEndRender(Cmd* pCmd, uint32_t renderTargetCount, RenderTarget** ppRenderTargets, RenderTarget* pDepthStencil)
-    {
-        ASSERT(pCmd);
-        
-        // Reset the bound resources flags for the current root signature's descriptor manager.
-        const tinystl::unordered_hash_node<ThreadID, DescriptorManager*>* pNode = pCmd->pBoundRootSignature->pDescriptorManagerMap.find(Thread::GetCurrentThreadID()).node;
-        if (pNode) reset_bound_resources(pNode->second);
-
-        @autoreleasepool {
-            util_end_current_encoders(pCmd);
+			pCmd->mRenderPassActive = true;
         }
     }
     
@@ -2226,9 +2279,9 @@ namespace RENDERER_CPP_NAMESPACE {
 #else
                     // Tessellated indirect-draw is not supported on iOS.
                     // Instead, read regular draw arguments from the indirect draw buffer.
-                    mapBuffer(pCmd->pCmdPool->pRenderer, pIndirectBuffer);
+                    mapBuffer(pCmd->pRenderer, pIndirectBuffer, NULL);
                     IndirectDrawArguments* pDrawArgs = (IndirectDrawArguments*)(pIndirectBuffer->pCpuMappedAddress) + indirectBufferOffset;
-                    unmapBuffer(pCmd->pCmdPool->pRenderer, pIndirectBuffer);
+                    unmapBuffer(pCmd->pRenderer, pIndirectBuffer);
                     
                     [pCmd->mtlRenderEncoder drawPatches:pCmd->pShader->mtlVertexShader.patchControlPointCount
                                              patchStart:pDrawArgs->mStartVertex
@@ -2266,9 +2319,9 @@ namespace RENDERER_CPP_NAMESPACE {
 #else
                     // Tessellated indirect-draw is not supported on iOS.
                     // Instead, read regular draw arguments from the indirect draw buffer.
-                    mapBuffer(pCmd->pCmdPool->pRenderer, pIndirectBuffer);
+                    mapBuffer(pCmd->pRenderer, pIndirectBuffer, NULL);
                     IndirectDrawIndexArguments* pDrawArgs = (IndirectDrawIndexArguments*)(pIndirectBuffer->pCpuMappedAddress) + indirectBufferOffset;
-                    unmapBuffer(pCmd->pCmdPool->pRenderer, pIndirectBuffer);
+                    unmapBuffer(pCmd->pRenderer, pIndirectBuffer);
                     
                     [pCmd->mtlRenderEncoder drawIndexedPatches:pCmd->pShader->mtlVertexShader.patchControlPointCount
                                                     patchStart:pDrawArgs->mStartIndex
@@ -2418,8 +2471,8 @@ namespace RENDERER_CPP_NAMESPACE {
         
         // set the queue built-in semaphore to signal when all command lists finished their execution
         __block uint32_t commandsFinished = 0;
-        __block dispatch_semaphore_t blockSemaphore = pQueue->pMtlSemaphore;
-        __block dispatch_semaphore_t completedFence = nil;
+        __weak dispatch_semaphore_t blockSemaphore = pQueue->pMtlSemaphore;
+        __weak dispatch_semaphore_t completedFence = nil;
         if(pFence)
         {
             completedFence = pFence->pMtlSemaphore;
@@ -2442,7 +2495,7 @@ namespace RENDERER_CPP_NAMESPACE {
             // register the following semaphores for signaling after the work has been done
             for (uint32_t j=0; j<signalSemaphoreCount; j++)
             {
-                __block dispatch_semaphore_t blockSemaphore = ppSignalSemaphores[j]->pMtlSemaphore;
+                __weak dispatch_semaphore_t blockSemaphore = ppSignalSemaphores[j]->pMtlSemaphore;
                 [ppCmds[i]->mtlCommandBuffer addCompletedHandler:^(id<MTLCommandBuffer> buffer) {
                     dispatch_semaphore_signal(blockSemaphore);
                 }];
@@ -2476,10 +2529,10 @@ namespace RENDERER_CPP_NAMESPACE {
         [pSwapChain->presentCommandBuffer commit];
         
         // after committing a command buffer no more commands can be encoded on it: create a new command buffer for future commands
-        pSwapChain->presentCommandBuffer = [pSwapChain->presentCommandQueue commandBuffer];
+        pSwapChain->presentCommandBuffer = [pQueue->mtlCommandQueue commandBuffer];
     }
     
-    void waitForFences(Queue* pQueue, uint32_t fenceCount, Fence** ppFences)
+    void waitForFences(Queue* pQueue, uint32_t fenceCount, Fence** ppFences, bool signal)
     {
         ASSERT(pQueue);
         ASSERT(fenceCount);
@@ -2487,18 +2540,23 @@ namespace RENDERER_CPP_NAMESPACE {
         
         for (uint32_t i=0; i<fenceCount; i++)
         {
-            if (ppFences[i]->mSubmitted){
-                dispatch_semaphore_wait(ppFences[i]->pMtlSemaphore, DISPATCH_TIME_FOREVER);
-                ppFences[i]->mCompleted = true;
-            }
+            if (ppFences[i]->mSubmitted) dispatch_semaphore_wait(ppFences[i]->pMtlSemaphore, DISPATCH_TIME_FOREVER);
             ppFences[i]->mSubmitted = false;
         }
     }
     
-    void getFenceStatus(Fence* pFence, FenceStatus* pFenceStatus)
+    void getFenceStatus(Renderer* pRenderer, Fence* pFence, FenceStatus* pFenceStatus)
     {
         ASSERT(pFence);
-        *pFenceStatus = (pFence->mCompleted ? FENCE_STATUS_COMPLETE : FENCE_STATUS_INCOMPLETE);
+        *pFenceStatus = FENCE_STATUS_COMPLETE;
+        if (pFence->mSubmitted)
+        {
+            // Check the fence status (and mark it as unsubmitted it if it has succesfully decremented).
+            long status = dispatch_semaphore_wait(pFence->pMtlSemaphore, DISPATCH_TIME_NOW);
+            if (status == 0) pFence->mSubmitted = false;
+            
+            *pFenceStatus = (status == 0 ? FENCE_STATUS_COMPLETE : FENCE_STATUS_INCOMPLETE);
+        }
     }
     
     void getRawTextureHandle(Renderer* pRenderer, Texture* pTexture, void** ppHandle)
@@ -2594,19 +2652,7 @@ namespace RENDERER_CPP_NAMESPACE {
             default: result = false; break;
         }
         return result;
-    }
-    
-    uint32_t calculateVertexLayoutStride(const VertexLayout* pVertexLayout)
-    {
-        ASSERT(pVertexLayout);
-        
-        uint32_t result = 0;
-        for (uint32_t i = 0; i < pVertexLayout->mAttribCount; ++i) {
-            result += calculateImageFormatStride(pVertexLayout->mAttribs[i].mFormat);
-        }
-        return result;
-    }
-    
+		}
     // -------------------------------------------------------------------------------------------------
     // Internal utility functions
     // -------------------------------------------------------------------------------------------------
@@ -2727,7 +2773,7 @@ namespace RENDERER_CPP_NAMESPACE {
             case ImageFormat::RGB10A2:  return MTLVertexFormatUInt1010102Normalized;
             default: break;
         }
-        NSLog(@"Unknown vertex format: %d", format);
+        LOGERRORF("Unknown vertex format: %d", format);
         return MTLVertexFormatInvalid;
     }
     
@@ -2739,43 +2785,6 @@ namespace RENDERER_CPP_NAMESPACE {
             return MTLLoadActionLoad;
         else
             return MTLLoadActionClear;
-    }
-    
-    void util_bind_root_constant(Cmd* pCmd, DescriptorManager* pManager, const DescriptorInfo* descInfo, const DescriptorData* descData)
-    {
-        // Since root constants are not supported on Metal,
-        // we just simulate them binding them as a regular buffer
-        uint32_t hash = tinystl::hash(descData->pName);
-        
-        // Look for the root constant buffer (or create one if needed).
-        Buffer* rootConstantBuffer = nil;
-        {
-            tinystl::unordered_map<uint32_t, tinystl::vector<Buffer*>>::iterator jt = pManager->mRootConstantBuffers.find(hash);
-            if (jt.node == nil || jt->second.getCount() <= pManager->mRootConstantBindingCountMap[tinystl::hash(descData->pName)])
-            {
-                BufferDesc bufferDesc = {};
-                bufferDesc.mUsage = BUFFER_USAGE_UPLOAD;
-                bufferDesc.mSize = descInfo->mDesc.size;
-                bufferDesc.mMemoryUsage = RESOURCE_MEMORY_USAGE_CPU_TO_GPU;
-                bufferDesc.mFlags = BUFFER_CREATION_FLAG_OWN_MEMORY_BIT | BUFFER_CREATION_FLAG_PERSISTENT_MAP_BIT;
-                
-                addBuffer(pCmd->pCmdPool->pRenderer, &bufferDesc, &rootConstantBuffer);
-                pManager->mRootConstantBuffers[hash].push_back(rootConstantBuffer);
-            }
-            else
-                rootConstantBuffer = jt->second[pManager->mRootConstantBindingCountMap[tinystl::hash(descData->pName)]];
-        }
-        
-        // Update the data on the buffer.
-        memcpy(rootConstantBuffer->pCpuMappedAddress, descData->pRootConstant, descInfo->mDesc.size);
-        
-        //Bind the buffer to the appropiate pipeline stages.
-        if ((descInfo->mDesc.used_stages & SHADER_STAGE_VERT) != 0)
-            [pCmd->mtlRenderEncoder setVertexBuffer:rootConstantBuffer->mtlBuffer offset:(rootConstantBuffer->mPositionInHeap + descData->mOffset) atIndex:descInfo->mDesc.reg];
-        if ((descInfo->mDesc.used_stages & SHADER_STAGE_FRAG) != 0)
-            [pCmd->mtlRenderEncoder setFragmentBuffer:rootConstantBuffer->mtlBuffer offset:(rootConstantBuffer->mPositionInHeap + descData->mOffset) atIndex:descInfo->mDesc.reg];
-        if ((descInfo->mDesc.used_stages & SHADER_STAGE_COMP) != 0)
-            [pCmd->mtlComputeEncoder setBuffer:rootConstantBuffer->mtlBuffer offset:(rootConstantBuffer->mPositionInHeap + descData->mOffset) atIndex:descInfo->mDesc.reg];
     }
     
     void util_bind_argument_buffer(Cmd* pCmd, DescriptorManager* pManager, const DescriptorInfo* descInfo, const DescriptorData* descData)
@@ -2806,7 +2815,7 @@ namespace RENDERER_CPP_NAMESPACE {
                 bufferDesc.mSize = argumentEncoder.encodedLength;
                 bufferDesc.mMemoryUsage = RESOURCE_MEMORY_USAGE_CPU_TO_GPU;
                 bufferDesc.mFlags = BUFFER_CREATION_FLAG_OWN_MEMORY_BIT;
-                addBuffer(pCmd->pCmdPool->pRenderer, &bufferDesc, &argumentBuffer);
+                addBuffer(pCmd->pRenderer, &bufferDesc, &argumentBuffer);
                 
                 pManager->mArgumentBuffers[hash] = { argumentBuffer, true};
                 bufferNeedsReencoding = true;
@@ -2832,9 +2841,11 @@ namespace RENDERER_CPP_NAMESPACE {
                         [argumentEncoder setSamplerState:descData->ppSamplers[i]->mtlSamplerState atIndex:i];
                         break;
                     case DESCRIPTOR_TYPE_BUFFER:
+                        [pCmd->mtlRenderEncoder useResource:descData->ppBuffers[i]->mtlBuffer usage:(MTLResourceUsageRead | MTLResourceUsageSample)];
                         [argumentEncoder setBuffer:descData->ppBuffers[i]->mtlBuffer offset:descData->ppBuffers[i]->mPositionInHeap atIndex:i];
                         break;
                     case DESCRIPTOR_TYPE_TEXTURE:
+                        [pCmd->mtlRenderEncoder useResource:descData->ppTextures[i]->mtlTexture usage:MTLResourceUsageRead];
                         [argumentEncoder setTexture:descData->ppTextures[i]->mtlTexture atIndex:i];
                         break;
                 }
@@ -2892,9 +2903,7 @@ namespace RENDERER_CPP_NAMESPACE {
     void add_texture(Renderer* pRenderer, const TextureDesc* pDesc, Texture** ppTexture, const bool isRT){
         Texture* pTexture = (Texture*)conf_calloc(1, sizeof(*pTexture));
         ASSERT(pTexture);
-        pTexture->pRenderer = pRenderer;
         pTexture->mDesc = *pDesc;
-        pTexture->pCpuMappedAddress = NULL;
         pTexture->mTextureId = (++gTextureIds << 8U) + util_pthread_to_uint64(Thread::GetCurrentThreadID());
         
         pTexture->mtlPixelFormat = util_to_mtl_pixel_format(pTexture->mDesc.mFormat, pTexture->mDesc.mSrgb);
@@ -2948,6 +2957,10 @@ namespace RENDERER_CPP_NAMESPACE {
                     else internal_log(LOG_TYPE_ERROR, "Cube Array textures are not supported on this iOS device", "addTexture");
 #endif
                     break;
+                default:
+                    internal_log(LOG_TYPE_ERROR,"Texture Type is not supported or is undefined.", "addTexture");
+                    break;
+                    
             }
             textureDesc.pixelFormat = pTexture->mtlPixelFormat;
             textureDesc.width = pTexture->mDesc.mWidth;

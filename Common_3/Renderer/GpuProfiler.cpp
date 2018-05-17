@@ -24,21 +24,20 @@
 
 #include "IRenderer.h"
 #include "GpuProfiler.h"
-#include "ResourceLoader.h"
 #include "../OS/Interfaces/IThread.h"
 #include "../OS/Interfaces/ILogManager.h"
-#include "../OS/Interfaces/IUIManager.h"
 #include "../OS/Interfaces/IMemoryManager.h"
+#if __linux__
+#include <linux/limits.h> //PATH_MAX declaration
+#define MAX_PATH PATH_MAX
+#endif
 
-extern void getTimestampFrequency(Queue* pQueue, double* pFrequency);
-extern void addQueryHeap(Renderer* pRenderer, const QueryHeapDesc* pDesc, QueryHeap** ppQueryHeap);
-extern void removeQueryHeap(Renderer* pRenderer, QueryHeap* pQueryHeap);
-extern void cmdBeginQuery(Cmd* pCmd, QueryHeap* pQueryHeap, QueryDesc* pQuery);
-extern void cmdEndQuery(Cmd* pCmd, QueryHeap* pQueryHeap, QueryDesc* pQuery);
-extern void cmdResolveQuery(Cmd* pCmd, QueryHeap* pQueryHeap, Buffer* pReadbackBuffer, uint32_t startQuery, uint32_t queryCount);
-
-extern void mapBuffer(Renderer* pRenderer, Buffer* pBuffer, ReadRange* pRange /* = NULL */);
+#if !defined(RENDERER_DLL_IMPORT)
+extern void addBuffer(Renderer* pRenderer, const BufferDesc* desc, Buffer** pp_buffer);
+extern void removeBuffer(Renderer* pRenderer, Buffer* p_buffer);
+extern void mapBuffer(Renderer* pRenderer, Buffer* pBuffer, ReadRange* pRange);
 extern void unmapBuffer(Renderer* pRenderer, Buffer* pBuffer);
+#endif
 
 #if defined(DIRECT3D12) || defined(VULKAN)
 void clearChildren(GpuTimerTree* pRoot)
@@ -46,7 +45,7 @@ void clearChildren(GpuTimerTree* pRoot)
 	if (!pRoot)
 		return;
 
-	for (uint32_t i = 0; i < pRoot->mChildren.getCount(); ++i)
+	for (uint32_t i = 0; i < (uint32_t)pRoot->mChildren.size(); ++i)
 		clearChildren(pRoot->mChildren[i]);
 
 	pRoot->mChildren.clear();
@@ -72,6 +71,8 @@ static void calculateTimes(Cmd* pCmd, GpuProfiler* pGpuProfiler, GpuTimerTree* p
 
 		uint32_t historyIndex = pRoot->mGpuTimer.mHistoryIndex;
 		
+		pRoot->mGpuTimer.mStartGpuTime = timeStamp1;
+		pRoot->mGpuTimer.mEndGpuTime = timeStamp2;
 		pRoot->mGpuTimer.mGpuTime = elapsedTime;
 		pRoot->mGpuTimer.mGpuHistory[historyIndex] = elapsedTime;
 
@@ -87,7 +88,7 @@ static void calculateTimes(Cmd* pCmd, GpuProfiler* pGpuProfiler, GpuTimerTree* p
 		pRoot->mGpuTimer.mHistoryIndex = (historyIndex + 1) % GpuTimer::LENGTH_OF_HISTORY;
 	}
 
-	for (uint32_t i = 0; i < pRoot->mChildren.getCount(); ++i)
+	for (uint32_t i = 0; i < (uint32_t)pRoot->mChildren.size(); ++i)
 		calculateTimes(pCmd, pGpuProfiler, pRoot->mChildren[i]);
 }
 #endif
@@ -127,40 +128,39 @@ double getAverageCpuTime(struct GpuProfiler* pGpuProfiler, struct GpuTimer* pGpu
 void addGpuProfiler(Renderer* pRenderer, Queue* pQueue, GpuProfiler** ppGpuProfiler, uint32_t maxTimers)
 {
 	GpuProfiler* pGpuProfiler = (GpuProfiler*)conf_calloc(1, sizeof(*pGpuProfiler));
+	ASSERT(pGpuProfiler);
 
 #if defined(DIRECT3D12) || defined(VULKAN)
-	QueryHeapDesc queryHeapDesc = { QUERY_TYPE_TIMESTAMP, maxTimers * 2 };
+	const uint32_t nodeIndex = pQueue->mQueueDesc.mNodeIndex;
+	QueryHeapDesc queryHeapDesc = {};
+	queryHeapDesc.mNodeIndex = nodeIndex;
+	queryHeapDesc.mQueryCount = maxTimers * 2;
+	queryHeapDesc.mType = QUERY_TYPE_TIMESTAMP;
+
+	BufferDesc bufDesc = {};
+	bufDesc.mUsage = BUFFER_USAGE_UPLOAD;
+	bufDesc.mMemoryUsage = RESOURCE_MEMORY_USAGE_GPU_TO_CPU;
+	bufDesc.mFlags = BUFFER_CREATION_FLAG_OWN_MEMORY_BIT;
+	bufDesc.mSize = maxTimers * sizeof(uint64_t) * 2;
+	bufDesc.pDebugName = (wchar_t*)L"GPU Profiler ReadBack Buffer";
+	bufDesc.mNodeIndex = nodeIndex;
+	bufDesc.mStartState = RESOURCE_STATE_COPY_DEST;
 
 	for (uint32_t i = 0; i < GpuProfiler::NUM_OF_FRAMES; ++i)
 	{
 		addQueryHeap(pRenderer, &queryHeapDesc, &pGpuProfiler->pQueryHeap[i]);
-	}
-
-	BufferLoadDesc bufDesc = {};
-	bufDesc.mDesc.mUsage = BUFFER_USAGE_UPLOAD;
-	bufDesc.mDesc.mMemoryUsage = RESOURCE_MEMORY_USAGE_GPU_TO_CPU;
-	bufDesc.mDesc.mFlags = BUFFER_CREATION_FLAG_OWN_MEMORY_BIT;
-	bufDesc.mDesc.mSize = maxTimers * sizeof(uint64_t) * 2;
-	bufDesc.pData = NULL;
-
-	for (uint32_t i = 0; i < GpuProfiler::NUM_OF_FRAMES; ++i)
-	{
-		bufDesc.ppBuffer = &pGpuProfiler->pReadbackBuffer[i];
-		addResource(&bufDesc);
+		addBuffer(pRenderer, &bufDesc, &pGpuProfiler->pReadbackBuffer[i]);
 	}
 
 	getTimestampFrequency(pQueue, &pGpuProfiler->mGpuTimeStampFrequency);
 	pGpuProfiler->mCpuTimeStampFrequency = (double)getTimerFrequency();
 #endif
 
-#if defined(VULKAN)
-	pGpuProfiler->mGpuTimeStampFrequency *= 1e+9;
-#endif
-
 	pGpuProfiler->mMaxTimerCount = maxTimers;
 	pGpuProfiler->pGpuTimerPool = (GpuTimerTree*)conf_calloc(maxTimers, sizeof(*pGpuProfiler->pGpuTimerPool));
 	pGpuProfiler->pCurrentNode = &pGpuProfiler->mRoot;
-
+	pGpuProfiler->mCurrentPoolIndex = 0;
+	
 	*ppGpuProfiler = pGpuProfiler;
 }
 
@@ -169,7 +169,7 @@ void removeGpuProfiler(Renderer* pRenderer, GpuProfiler* pGpuProfiler)
 #if defined(DIRECT3D12) || defined(VULKAN)
 	for (uint32_t i = 0; i < GpuProfiler::NUM_OF_FRAMES; ++i)
 	{
-		removeResource(pGpuProfiler->pReadbackBuffer[i]);
+		removeBuffer(pRenderer, pGpuProfiler->pReadbackBuffer[i]);
 		removeQueryHeap(pRenderer, pGpuProfiler->pQueryHeap[i]);
 	}
 #endif
@@ -192,16 +192,16 @@ void cmdBeginGpuTimestampQuery(Cmd* pCmd, struct GpuProfiler* pGpuProfiler, cons
 #if defined(DIRECT3D12) || defined(VULKAN)
 
 	// hash name
-	char buffer[MAX_PATH];
-	sprintf(buffer, "%s_%u", pName, pGpuProfiler->mCurrentTimerCount);
-	uint32_t hash = tinystl::hash(buffer);
+	char _buffer[MAX_PATH] = {}; //Initialize to empty
+	sprintf(_buffer, "%s_%u", pName, pGpuProfiler->mCurrentTimerCount);
+	uint32_t _hash = tinystl::hash(_buffer);
 
 	GpuTimerTree* node = nullptr;
-	if (pGpuProfiler->mGpuPoolHash.find(hash) == pGpuProfiler->mGpuPoolHash.end())
+	if (pGpuProfiler->mGpuPoolHash.find(_hash) == pGpuProfiler->mGpuPoolHash.end())
 	{
 		// frist time seeing this
 		node = &pGpuProfiler->pGpuTimerPool[pGpuProfiler->mCurrentPoolIndex];
-		pGpuProfiler->mGpuPoolHash[hash] = pGpuProfiler->mCurrentPoolIndex;
+		pGpuProfiler->mGpuPoolHash[_hash] = pGpuProfiler->mCurrentPoolIndex;
 
 		++pGpuProfiler->mCurrentPoolIndex;
 
@@ -212,7 +212,7 @@ void cmdBeginGpuTimestampQuery(Cmd* pCmd, struct GpuProfiler* pGpuProfiler, cons
 	}
 	else
 	{
-		uint32_t index = pGpuProfiler->mGpuPoolHash[hash];
+		uint32_t index = pGpuProfiler->mGpuPoolHash[_hash];
 		node = &pGpuProfiler->pGpuTimerPool[index];
 	}
 
@@ -270,16 +270,7 @@ void cmdBeginGpuFrameProfile(Cmd* pCmd, GpuProfiler* pGpuProfiler, bool bUseMark
 		pGpuProfiler->pReadbackBuffer[pGpuProfiler->mBufferIndex], 
 		0, pGpuProfiler->mCurrentTimerCount * 2);
 
-
-	ReadRange range = {};
-	range.mOffset = 0;
-	range.mSize = max(sizeof(uint64_t) * 2, (pGpuProfiler->mCurrentTimerCount) * sizeof(uint64_t) * 2);
-
-	// readback n + 1 frame
 	uint32_t nextIndex = (pGpuProfiler->mBufferIndex + 1) % GpuProfiler::NUM_OF_FRAMES;
-	mapBuffer(pCmd->pCmdPool->pRenderer, pGpuProfiler->pReadbackBuffer[nextIndex], &range);
-	pGpuProfiler->pTimeStamp = (uint64_t*)pGpuProfiler->pReadbackBuffer[nextIndex]->pCpuMappedAddress;
-
 	pGpuProfiler->mBufferIndex = nextIndex;
 
 	clearChildren(&pGpuProfiler->mRoot);
@@ -300,16 +291,23 @@ void cmdEndGpuFrameProfile(Cmd* pCmd, GpuProfiler* pGpuProfiler)
 #if defined(DIRECT3D12) || defined(VULKAN)
 	cmdEndGpuTimestampQuery(pCmd, pGpuProfiler);
 
-	for (uint32_t i = 0; i < pGpuProfiler->mRoot.mChildren.getCount(); ++i)
+	for (uint32_t i = 0; i < (uint32_t)pGpuProfiler->mRoot.mChildren.size(); ++i)
 	{
 		pGpuProfiler->mCumulativeTimeInternal += getAverageGpuTime(pGpuProfiler, &pGpuProfiler->mRoot.mChildren[i]->mGpuTimer);
 
 		pGpuProfiler->mCumulativeCpuTimeInternal += getAverageCpuTime(pGpuProfiler, &pGpuProfiler->mRoot.mChildren[i]->mGpuTimer);
 	}
 
+	// readback n + 1 frame
+	ReadRange range = {};
+	range.mOffset = 0;
+	range.mSize = max(sizeof(uint64_t) * 2, (pGpuProfiler->mCurrentTimerCount) * sizeof(uint64_t) * 2);
+	mapBuffer(pCmd->pRenderer, pGpuProfiler->pReadbackBuffer[pGpuProfiler->mBufferIndex], &range);
+	pGpuProfiler->pTimeStamp = (uint64_t*)pGpuProfiler->pReadbackBuffer[pGpuProfiler->mBufferIndex]->pCpuMappedAddress;
+
 	calculateTimes(pCmd, pGpuProfiler, &pGpuProfiler->mRoot);
 
-	unmapBuffer(pCmd->pCmdPool->pRenderer, pGpuProfiler->pReadbackBuffer[pGpuProfiler->mBufferIndex]);
+	unmapBuffer(pCmd->pRenderer, pGpuProfiler->pReadbackBuffer[pGpuProfiler->mBufferIndex]);
 	pGpuProfiler->pTimeStamp = NULL;
 
 #endif

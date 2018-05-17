@@ -25,43 +25,44 @@
 #define _USE_MATH_DEFINES
 
 //tiny stl
-#include "../../Common_3/ThirdParty/OpenSource/TinySTL/vector.h"
-#include "../../Common_3/ThirdParty/OpenSource/TinySTL/string.h"
+#include "../../../../Common_3/ThirdParty/OpenSource/TinySTL/vector.h"
+#include "../../../../Common_3/ThirdParty/OpenSource/TinySTL/string.h"
 
 //Interfaces
-#include "../../Common_3/OS/Interfaces/ICameraController.h"
-#include "../../Common_3/OS/Interfaces/ILogManager.h"
-#include "../../Common_3/OS/Interfaces/IFileSystem.h"
-#include "../../Common_3/OS/Interfaces/ITimeManager.h"
-#include "../../Common_3/OS/Interfaces/IThread.h"
-#include "../../Common_3/OS/Interfaces/IUIManager.h"
-#include "../../Common_3/OS/Interfaces/IApp.h"
+#include "../../../../Common_3/OS/Interfaces/ICameraController.h"
+#include "../../../../Common_3/OS/Interfaces/ILogManager.h"
+#include "../../../../Common_3/OS/Interfaces/IFileSystem.h"
+#include "../../../../Common_3/OS/Interfaces/ITimeManager.h"
+#include "../../../../Common_3/OS/Interfaces/IThread.h"
+#include "../../../../Middleware_3/UI/AppUI.h"
+#include "../../../../Common_3/OS/Core/DebugRenderer.h"
+#include "../../../../Common_3/OS/Interfaces/IApp.h"
 
-#include "../../Common_3/OS/Math/MathTypes.h"
-#include "../../Common_3/OS/Image/Image.h"
+#include "../../../../Common_3/OS/Math/MathTypes.h"
+#include "../../../../Common_3/OS/Image/Image.h"
 
 // for cpu usage query
-#ifdef _WIN32
+#if defined(_WIN32)
+#if defined(_DURANGO)
+#else
 #include <Windows.h>
 #include <comdef.h>
 #include <Wbemidl.h>
 #pragma comment(lib, "wbemuuid.lib")
 #pragma comment(lib, "comsuppw.lib")
+#endif
+#elif defined(LINUX)
 #else
 #include <mach/mach.h>
 #include <mach/processor_info.h>
 #include <mach/mach_host.h>
 #endif
 
-#include "../../Common_3/Renderer/IRenderer.h"
-#include "../../Common_3/Renderer/GpuProfiler.h"
-#include "../../Common_3/Renderer/ResourceLoader.h"
+#include "../../../../Common_3/Renderer/IRenderer.h"
+#include "../../../../Common_3/Renderer/GpuProfiler.h"
+#include "../../../../Common_3/Renderer/ResourceLoader.h"
 
-//ui
-#include "../../Common_3/OS/UI/UI.h"
-#include "../../Common_3/OS/UI/UIRenderer.h"
-
-#include "../../Common_3/OS/Interfaces/IMemoryManager.h"
+#include "../../../../Common_3/OS/Interfaces/IMemoryManager.h"
 
 // startdust hash function, use this to generate all the seed and update the position of all particles
 #define RND_GEN(x) (x = x * 196314165 + 907633515)
@@ -169,11 +170,16 @@ Texture*                pVirtualJoystickTex = nullptr;
 Sampler*				pSampler = nullptr;
 Sampler*				pSamplerSkyBox = nullptr;
 uint32_t				gFrameIndex = 0;
-uint					gCPUCoreCount = 0;
 
-#ifdef _WIN32
+#if defined(_WIN32)
+#if defined(_DURANGO)
+#else
 IWbemServices*			pService;
 IWbemLocator*			pLocator;
+uint64_t*				pOldTimeStamp;
+uint64_t*				pOldPprocUsage;
+#endif
+#elif(LINUX)
 uint64_t*				pOldTimeStamp;
 uint64_t*				pOldPprocUsage;
 #else
@@ -181,6 +187,7 @@ NSLock*					CPUUsageLock;
 processor_info_array_t	prevCpuInfo;
 mach_msg_type_number_t	numPrevCpuInfo;
 #endif
+
 uint					gCoresCount;
 float*					pCoresLoadData;
 
@@ -198,7 +205,7 @@ float					gPaletteFactor;
 uint					gTextureIndex;
 
 GpuProfiler*			pGpuProfilers[gThreadCount] = { nullptr };
-UIManager*				pUIManager = nullptr;
+UIApp					gAppUI;
 ICameraController*		pCameraController = nullptr;
 
 FileSystem				gFileSystem;
@@ -230,25 +237,46 @@ const char*				pSkyBoxImageFileNames[] =
 #if defined(DIRECT3D12)
 #define RESOURCE_DIR "PCDX12"
 #elif defined(VULKAN)
-#define RESOURCE_DIR "PCVulkan"
+	#if defined(_WIN32)
+	#define RESOURCE_DIR "PCVulkan"
+	#elif defined(LINUX)
+	#define RESOURCE_DIR "LINUXVulkan"
+	#endif
 #elif defined(METAL)
 #define RESOURCE_DIR "OSXMetal"
 #else
 #error PLATFORM NOT SUPPORTED
 #endif
 
+#ifdef _DURANGO
+// Durango load assets from 'Layout\Image\Loose'
+const char* pszRoots[] =
+{
+	"Shaders/Binary/",									// FSR_BinShaders
+	"Shaders/",											// FSR_SrcShaders
+	"Shaders/Binary/",									// FSR_BinShaders_Common
+	"Shaders/",											// FSR_SrcShaders_Common
+	"Textures/",										// FSR_Textures
+	"Meshes/",											// FSR_Meshes
+	"Fonts/",											// FSR_Builtin_Fonts
+	"",													// FSR_OtherFiles
+};
+#else
 //Example for using roots or will cause linker error with the extern root in FileSystem.cpp
 const char* pszRoots[] =
 {
-	"../../..//src/03_MultiThread/" RESOURCE_DIR "/Binary/",	// FSR_BinShaders
-	"../../..//src/03_MultiThread/" RESOURCE_DIR "/",			// FSR_SrcShaders
-	"",															// FSR_BinShaders_Common
-	"",															// FSR_SrcShaders_Common
-	"../../..//UnitTestResources/Textures/",					// FSR_Textures
-	"../../..//UnitTestResources/Meshes/",						// FSR_Meshes
-	"../../..//UnitTestResources/Fonts/",						// FSR_Builtin_Fonts
-	"",															// FSR_OtherFiles
+	"../../../src/03_MultiThread/" RESOURCE_DIR "/Binary/",	// FSR_BinShaders
+	"../../../src/03_MultiThread/" RESOURCE_DIR "/",		// FSR_SrcShaders
+	"",													// FSR_BinShaders_Common
+	"",													// FSR_SrcShaders_Common
+	"../../../UnitTestResources/Textures/",				// FSR_Textures
+	"../../../UnitTestResources/Meshes/",				// FSR_Meshes
+	"../../../UnitTestResources/Fonts/",				// FSR_Builtin_Fonts
+	"",													// FSR_OtherFiles
 };
+#endif
+
+DebugTextDrawDesc gFrameTimeDraw = DebugTextDrawDesc(0, 0xff00ffff, 18);
 
 class MultiThread : public IApp
 {
@@ -258,7 +286,7 @@ public:
 		InitCpuUsage();
 
 		gGraphWidth = mSettings.mWidth / 6; //200;
-		gGraphHeight = (mSettings.mHeight - 30 - gCoresCount * 10) / gCoresCount;
+		gGraphHeight = gCoresCount ? (mSettings.mHeight - 30 - gCoresCount * 10) / gCoresCount : 0;
 
 		RendererDesc settings = { 0 };
 		// settings.pLogFn = RendererLog;
@@ -294,8 +322,7 @@ public:
 
 		HiresTimer timer;
 		initResourceLoaderInterface(pRenderer, DEFAULT_MEMORY_BUDGET, true);
-
-		Load();
+		initDebugRendererInterface(pRenderer, FileSystem::FixPath("TitilliumText/TitilliumText-Bold.ttf", FSR_Builtin_Fonts));
 
 		// load all image to GPU
 		for (int i = 0; i < 5; ++i)
@@ -337,62 +364,70 @@ public:
 #endif
 
 		ShaderLoadDesc graphShader = {};
-		graphShader.mStages[0] = { "graph.vert", NULL, 0, FSR_SrcShaders };
-		graphShader.mStages[1] = { "graph.frag", NULL, 0, FSR_SrcShaders };
+		graphShader.mStages[0] = { "Graph.vert", NULL, 0, FSR_SrcShaders };
+		graphShader.mStages[1] = { "Graph.frag", NULL, 0, FSR_SrcShaders };
 
 		ShaderLoadDesc particleShader = {};
-		particleShader.mStages[0] = { "particle.vert", NULL, 0, FSR_SrcShaders };
-		particleShader.mStages[1] = { "particle.frag", NULL, 0, FSR_SrcShaders };
+		particleShader.mStages[0] = { "Particle.vert", NULL, 0, FSR_SrcShaders };
+		particleShader.mStages[1] = { "Particle.frag", NULL, 0, FSR_SrcShaders };
 
 		ShaderLoadDesc skyShader = {};
-		skyShader.mStages[0] = { "skybox.vert", NULL, 0, FSR_SrcShaders };
-		skyShader.mStages[1] = { "skybox.frag", NULL, 0, FSR_SrcShaders };
+		skyShader.mStages[0] = { "Skybox.vert", NULL, 0, FSR_SrcShaders };
+		skyShader.mStages[1] = { "Skybox.frag", NULL, 0, FSR_SrcShaders };
 
 		addShader(pRenderer, &particleShader, &pShader);
 		addShader(pRenderer, &skyShader, &pSkyBoxDrawShader);
 		addShader(pRenderer, &graphShader, &pGraphShader);
 
-		addSampler(pRenderer, &pSampler, FILTER_LINEAR, FILTER_LINEAR, MIPMAP_MODE_NEAREST, ADDRESS_MODE_REPEAT, ADDRESS_MODE_REPEAT, ADDRESS_MODE_REPEAT);
-		addSampler(pRenderer, &pSamplerSkyBox, FILTER_LINEAR, FILTER_LINEAR, MIPMAP_MODE_NEAREST, ADDRESS_MODE_CLAMP_TO_EDGE, ADDRESS_MODE_CLAMP_TO_EDGE, ADDRESS_MODE_CLAMP_TO_EDGE);
+		SamplerDesc samplerDesc = {
+			FILTER_LINEAR, FILTER_LINEAR, MIPMAP_MODE_NEAREST,
+			ADDRESS_MODE_REPEAT, ADDRESS_MODE_REPEAT, ADDRESS_MODE_REPEAT
+		};
+		SamplerDesc skyBoxSamplerDesc = {
+			FILTER_LINEAR, FILTER_LINEAR, MIPMAP_MODE_NEAREST,
+			ADDRESS_MODE_CLAMP_TO_EDGE, ADDRESS_MODE_CLAMP_TO_EDGE, ADDRESS_MODE_CLAMP_TO_EDGE
+		};
+		addSampler(pRenderer, &samplerDesc, &pSampler);
+		addSampler(pRenderer, &skyBoxSamplerDesc, &pSamplerSkyBox);
 
-		addBlendState(&gParticleBlend, BC_ONE, BC_ONE, BC_ONE, BC_ONE, BM_ADD, BM_ADD, 15);
-		addRasterizerState(&gSkyboxRast, CULL_MODE_NONE);
+		BlendStateDesc blendStateDesc = {};
+		blendStateDesc.mSrcAlphaFactor = BC_ONE;
+		blendStateDesc.mDstAlphaFactor = BC_ONE;
+		blendStateDesc.mSrcFactor = BC_ONE;
+		blendStateDesc.mDstFactor = BC_ONE;
+		blendStateDesc.mMask = ALL;
+		blendStateDesc.mRenderTargetMask = BLEND_STATE_TARGET_0;
+		addBlendState(pRenderer, &blendStateDesc, &gParticleBlend);
 
-		RootSignatureDesc skyBoxRootDesc = {};
-		skyBoxRootDesc.mStaticSamplers["uSkyboxSampler"] = pSamplerSkyBox;
-		skyBoxRootDesc.mStaticSamplers["uSampler0"] = pSampler;
+		RasterizerStateDesc rasterizerStateDesc = {};
+		rasterizerStateDesc.mCullMode = CULL_MODE_NONE;
+		addRasterizerState(pRenderer, &rasterizerStateDesc, &gSkyboxRast);
+
+		const char* pStaticSamplerNames[] = { "uSampler0", "uSkyboxSampler" };
+		Sampler* pSamplers[] = { pSampler, pSamplerSkyBox };
 		Shader* shaders[] = { pShader, pSkyBoxDrawShader };
-		addRootSignature(pRenderer, 2, shaders, &pRootSignature, &skyBoxRootDesc);
+		RootSignatureDesc skyBoxRootDesc = {};
+		skyBoxRootDesc.mStaticSamplerCount = 2;
+		skyBoxRootDesc.ppStaticSamplerNames = pStaticSamplerNames;
+		skyBoxRootDesc.ppStaticSamplers = pSamplers;
+		skyBoxRootDesc.mShaderCount = 2;
+		skyBoxRootDesc.ppShaders = shaders;
+		addRootSignature(pRenderer, &skyBoxRootDesc, &pRootSignature);
 
-		//vertexlayout and pipeline for particles
-		VertexLayout vertexLayout = {};
-		vertexLayout.mAttribCount = 1;
-		vertexLayout.mAttribs[0].mSemantic = SEMANTIC_POSITION;
-		vertexLayout.mAttribs[0].mFormat = ImageFormat::R32UI;
-		vertexLayout.mAttribs[0].mBinding = 0;
-		vertexLayout.mAttribs[0].mLocation = 0;
-		vertexLayout.mAttribs[0].mOffset = 0;
-
-		GraphicsPipelineDesc pipelineSettings = { 0 };
-		pipelineSettings.mPrimitiveTopo = PRIMITIVE_TOPO_POINT_LIST;
-		pipelineSettings.mRenderTargetCount = 1;
-		pipelineSettings.pBlendState = gParticleBlend;
-		pipelineSettings.pRasterizerState = gSkyboxRast;
-		pipelineSettings.ppRenderTargets = &pSwapChain->ppSwapchainRenderTargets[0];
-		pipelineSettings.pRootSignature = pRootSignature;
-		pipelineSettings.pShaderProgram = pShader;
-		pipelineSettings.pVertexLayout = &vertexLayout;
-		addPipeline(pRenderer, &pipelineSettings, &pPipeline);
+		RootSignatureDesc graphRootDesc = {};
+		graphRootDesc.mShaderCount = 1;
+		graphRootDesc.ppShaders = &pGraphShader;
+		addRootSignature(pRenderer, &graphRootDesc, &pGraphRootSignature);
 
 		gTextureIndex = 0;
 
-#ifdef _WIN32
-		SYSTEM_INFO sysinfo;
-		GetSystemInfo(&sysinfo);
-		gCPUCoreCount = sysinfo.dwNumberOfProcessors;
-#elif defined(__APPLE__)
-		gCPUCoreCount = (unsigned int)[[NSProcessInfo processInfo] processorCount];
-#endif
+//#ifdef _WIN32
+//		SYSTEM_INFO sysinfo;
+//		GetSystemInfo(&sysinfo);
+//		gCPUCoreCount = sysinfo.dwNumberOfProcessors;
+//#elif defined(__APPLE__)
+//		gCPUCoreCount = (unsigned int)[[NSProcessInfo processInfo] processorCount];
+//#endif
 
 		//Generate sky box vertex buffer
 		float skyBoxPoints[] = {
@@ -449,56 +484,6 @@ public:
 		skyboxVbDesc.ppBuffer = &pSkyBoxVertexBuffer;
 		addResource (&skyboxVbDesc);
 
-		//layout and pipeline for skybox draw
-		vertexLayout = {};
-		vertexLayout.mAttribCount = 1;
-		vertexLayout.mAttribs[0].mSemantic = SEMANTIC_POSITION;
-		vertexLayout.mAttribs[0].mFormat = ImageFormat::RGBA32F;
-		vertexLayout.mAttribs[0].mBinding = 0;
-		vertexLayout.mAttribs[0].mLocation = 0;
-		vertexLayout.mAttribs[0].mOffset = 0;
-
-		pipelineSettings = { 0 };
-		pipelineSettings.mPrimitiveTopo = PRIMITIVE_TOPO_TRI_LIST;
-		pipelineSettings.mRenderTargetCount = 1;
-		pipelineSettings.pRasterizerState = gSkyboxRast;
-		pipelineSettings.ppRenderTargets = &pSwapChain->ppSwapchainRenderTargets[0];
-		pipelineSettings.pRootSignature = pRootSignature;
-		pipelineSettings.pShaderProgram = pSkyBoxDrawShader;
-		pipelineSettings.pVertexLayout = &vertexLayout;
-		addPipeline(pRenderer, &pipelineSettings, &pSkyBoxDrawPipeline);
-
-		/********** layout and pipeline for graph draw*****************/
-		vertexLayout = {};
-		vertexLayout.mAttribCount = 2;
-		vertexLayout.mAttribs[0].mSemantic = SEMANTIC_POSITION;
-		vertexLayout.mAttribs[0].mFormat = (sizeof(GraphVertex) > 24 ? ImageFormat::RGBA32F : ImageFormat::RG32F); // Handle the case when padding is added to the struct (yielding 32 bytes instead of 24) on macOS
-		vertexLayout.mAttribs[0].mBinding = 0;
-		vertexLayout.mAttribs[0].mLocation = 0;
-		vertexLayout.mAttribs[0].mOffset = 0;
-		vertexLayout.mAttribs[1].mSemantic = SEMANTIC_COLOR;
-		vertexLayout.mAttribs[1].mFormat = ImageFormat::RGBA32F;
-		vertexLayout.mAttribs[1].mBinding = 0;
-		vertexLayout.mAttribs[1].mLocation = 1;
-		vertexLayout.mAttribs[1].mOffset = calculateImageFormatStride(vertexLayout.mAttribs[0].mFormat);
-		addRootSignature(pRenderer, 1, &pGraphShader, &pGraphRootSignature);
-
-		pipelineSettings = { 0 };
-		pipelineSettings.mPrimitiveTopo = PRIMITIVE_TOPO_LINE_STRIP;
-		pipelineSettings.mRenderTargetCount = 1;
-		pipelineSettings.ppRenderTargets = &pSwapChain->ppSwapchainRenderTargets[0];
-		pipelineSettings.pRootSignature = pGraphRootSignature;
-		pipelineSettings.pShaderProgram = pGraphShader;
-		pipelineSettings.pVertexLayout = &vertexLayout;
-		addPipeline(pRenderer, &pipelineSettings, &pGraphLinePipeline);
-
-		pipelineSettings.mPrimitiveTopo = PRIMITIVE_TOPO_TRI_STRIP;
-		addPipeline(pRenderer, &pipelineSettings, &pGraphTrianglePipeline);
-
-		pipelineSettings.mPrimitiveTopo = PRIMITIVE_TOPO_LINE_LIST;
-		addPipeline(pRenderer, &pipelineSettings, &pGraphLineListPipeline);
-		/********************************************************************/
-
 		BufferLoadDesc ubDesc = {};
 		ubDesc.mDesc.mUsage = BUFFER_USAGE_UNIFORM;
 		ubDesc.mDesc.mMemoryUsage = RESOURCE_MEMORY_USAGE_CPU_TO_GPU;
@@ -514,16 +499,16 @@ public:
 		LOGINFOF ("Load Time %lld", timer.GetUSec (false) / 1000);
 
 		// generate partcile data
-		unsigned int gSeed = 23232323;
+		unsigned int particleSeed = 23232323; //we have gseed as global declaration, pick a name that is not gseed
 		for (int i = 0; i < 6 * 9; ++i) {
-			RND_GEN(gSeed);
+			RND_GEN(particleSeed);
 		}
 		uint32_t* seedArray = NULL;
 		seedArray = (uint32_t*)conf_malloc(gTotalParticleCount * sizeof(uint32_t));
 		for (int i = 0; i < gTotalParticleCount; ++i)
 		{
-			RND_GEN(gSeed);
-			seedArray[i] = gSeed;
+			RND_GEN(particleSeed);
+			seedArray[i] = particleSeed;
 		}
 		uint64_t parDataSize = sizeof(uint32_t)* (uint64_t)gTotalParticleCount;
 		uint32_t parDataStride = sizeof(uint32_t);
@@ -594,9 +579,10 @@ public:
 			addResource(&vbDesc);
 		}
 
-		UISettings uiSettings = {};
-		uiSettings.pDefaultFontName = "TitilliumText/TitilliumText-Bold.ttf";
-		addUIManagerInterface(pRenderer, &uiSettings, &pUIManager);
+		if (!gAppUI.Init(pRenderer))
+			return false;
+
+		gAppUI.LoadFont(FileSystem::FixPath("TitilliumText/TitilliumText-Bold.ttf", FSR_Builtin_Fonts));
 
 		gThreadSystem.CreateThreads(Thread::GetNumCPUCores() - 1);
 
@@ -613,11 +599,11 @@ public:
 #endif
 
 		pCameraController->setMotionParameters(cmp);
-
+#if !defined(_DURANGO)
 		registerRawMouseMoveEvent(cameraMouseMove);
 		registerMouseButtonEvent(cameraMouseButton);
 		registerMouseWheelEvent(cameraMouseWheel);
-        
+#endif
 #ifdef TARGET_IOS
         registerTouchEvent(cameraTouch);
         registerTouchMoveEvent(cameraTouchMove);
@@ -632,7 +618,7 @@ public:
 
 	void Exit()
 	{
-		waitForFences(pGraphicsQueue, 1, &pRenderCompleteFences[gFrameIndex % gImageCount]);
+		waitForFences(pGraphicsQueue, 1, &pRenderCompleteFences[gFrameIndex % gImageCount], true);
 
 #if USE_CAMERACONTROLLER
 		destroyCameraController(pCameraController);
@@ -641,7 +627,9 @@ public:
 		for (uint32_t i = 0; i < gThreadCount; ++i)
 			removeGpuProfiler(pRenderer, pGpuProfilers[i]);
 
-		removeUIManagerInterface(pRenderer, pUIManager);
+		removeDebugRendererInterface();
+
+		gAppUI.Exit();
 
 		removeResource(pProjViewUniformBuffer);
 		removeResource(pSkyboxUniformBuffer);
@@ -675,18 +663,11 @@ public:
 		removeShader(pRenderer, pShader);
 		removeShader(pRenderer, pSkyBoxDrawShader);
 		removeShader(pRenderer, pGraphShader);
-		removePipeline(pRenderer, pPipeline);
-		removePipeline(pRenderer, pSkyBoxDrawPipeline);
-		removePipeline(pRenderer, pGraphLineListPipeline);
-		removePipeline(pRenderer, pGraphLinePipeline);
-		removePipeline(pRenderer, pGraphTrianglePipeline);
 		removeRootSignature(pRenderer, pRootSignature);
 		removeRootSignature(pRenderer, pGraphRootSignature);
 
 		removeBlendState(gParticleBlend);
 		removeRasterizerState(gSkyboxRast);
-
-		Unload();
 
 		for (uint32_t i = 0; i < gImageCount; ++i)
 		{
@@ -716,23 +697,105 @@ public:
 
 	bool Load()
 	{
-		SwapChainDesc swapChainDesc = {};
-		swapChainDesc.pWindow = pWindow;
-		swapChainDesc.pQueue = pGraphicsQueue;
-		swapChainDesc.mWidth = mSettings.mWidth;
-		swapChainDesc.mHeight = mSettings.mHeight;
-		swapChainDesc.mImageCount = gImageCount;
-		swapChainDesc.mSampleCount = SAMPLE_COUNT_1;
-		swapChainDesc.mColorFormat = ImageFormat::BGRA8;
-		swapChainDesc.mEnableVsync = false;
-		addSwapChain(pRenderer, &swapChainDesc, &pSwapChain);
+		if (!addSwapChain())
+			return false;
+
+		if (!gAppUI.Load(pSwapChain->ppSwapchainRenderTargets))
+			return false;
+
+		//vertexlayout and pipeline for particles
+		VertexLayout vertexLayout = {};
+		vertexLayout.mAttribCount = 1;
+		vertexLayout.mAttribs[0].mSemantic = SEMANTIC_POSITION;
+		vertexLayout.mAttribs[0].mFormat = ImageFormat::R32UI;
+		vertexLayout.mAttribs[0].mBinding = 0;
+		vertexLayout.mAttribs[0].mLocation = 0;
+		vertexLayout.mAttribs[0].mOffset = 0;
+
+		GraphicsPipelineDesc pipelineSettings = { 0 };
+		pipelineSettings.mPrimitiveTopo = PRIMITIVE_TOPO_POINT_LIST;
+		pipelineSettings.mRenderTargetCount = 1;
+		pipelineSettings.pBlendState = gParticleBlend;
+		pipelineSettings.pRasterizerState = gSkyboxRast;
+		pipelineSettings.pColorFormats = &pSwapChain->ppSwapchainRenderTargets[0]->mDesc.mFormat;
+		pipelineSettings.pSrgbValues = &pSwapChain->ppSwapchainRenderTargets[0]->mDesc.mSrgb;
+		pipelineSettings.mSampleCount = pSwapChain->ppSwapchainRenderTargets[0]->mDesc.mSampleCount;
+		pipelineSettings.mSampleQuality = pSwapChain->ppSwapchainRenderTargets[0]->mDesc.mSampleQuality;
+		pipelineSettings.pRootSignature = pRootSignature;
+		pipelineSettings.pShaderProgram = pShader;
+		pipelineSettings.pVertexLayout = &vertexLayout;
+		addPipeline(pRenderer, &pipelineSettings, &pPipeline);
+
+		//layout and pipeline for skybox draw
+		vertexLayout = {};
+		vertexLayout.mAttribCount = 1;
+		vertexLayout.mAttribs[0].mSemantic = SEMANTIC_POSITION;
+		vertexLayout.mAttribs[0].mFormat = ImageFormat::RGBA32F;
+		vertexLayout.mAttribs[0].mBinding = 0;
+		vertexLayout.mAttribs[0].mLocation = 0;
+		vertexLayout.mAttribs[0].mOffset = 0;
+
+		pipelineSettings = { 0 };
+		pipelineSettings.mPrimitiveTopo = PRIMITIVE_TOPO_TRI_LIST;
+		pipelineSettings.mRenderTargetCount = 1;
+		pipelineSettings.pRasterizerState = gSkyboxRast;
+		pipelineSettings.pColorFormats = &pSwapChain->ppSwapchainRenderTargets[0]->mDesc.mFormat;
+		pipelineSettings.pSrgbValues = &pSwapChain->ppSwapchainRenderTargets[0]->mDesc.mSrgb;
+		pipelineSettings.mSampleCount = pSwapChain->ppSwapchainRenderTargets[0]->mDesc.mSampleCount;
+		pipelineSettings.mSampleQuality = pSwapChain->ppSwapchainRenderTargets[0]->mDesc.mSampleQuality;
+		pipelineSettings.pRootSignature = pRootSignature;
+		pipelineSettings.pShaderProgram = pSkyBoxDrawShader;
+		pipelineSettings.pVertexLayout = &vertexLayout;
+		addPipeline(pRenderer, &pipelineSettings, &pSkyBoxDrawPipeline);
+
+		/********** layout and pipeline for graph draw*****************/
+		vertexLayout = {};
+		vertexLayout.mAttribCount = 2;
+		vertexLayout.mAttribs[0].mSemantic = SEMANTIC_POSITION;
+		vertexLayout.mAttribs[0].mFormat = (sizeof(GraphVertex) > 24 ? ImageFormat::RGBA32F : ImageFormat::RG32F); // Handle the case when padding is added to the struct (yielding 32 bytes instead of 24) on macOS
+		vertexLayout.mAttribs[0].mBinding = 0;
+		vertexLayout.mAttribs[0].mLocation = 0;
+		vertexLayout.mAttribs[0].mOffset = 0;
+		vertexLayout.mAttribs[1].mSemantic = SEMANTIC_COLOR;
+		vertexLayout.mAttribs[1].mFormat = ImageFormat::RGBA32F;
+		vertexLayout.mAttribs[1].mBinding = 0;
+		vertexLayout.mAttribs[1].mLocation = 1;
+		vertexLayout.mAttribs[1].mOffset = calculateImageFormatStride(vertexLayout.mAttribs[0].mFormat);
+
+		pipelineSettings = { 0 };
+		pipelineSettings.mPrimitiveTopo = PRIMITIVE_TOPO_LINE_STRIP;
+		pipelineSettings.mRenderTargetCount = 1;
+		pipelineSettings.pColorFormats = &pSwapChain->ppSwapchainRenderTargets[0]->mDesc.mFormat;
+		pipelineSettings.pSrgbValues = &pSwapChain->ppSwapchainRenderTargets[0]->mDesc.mSrgb;
+		pipelineSettings.mSampleCount = pSwapChain->ppSwapchainRenderTargets[0]->mDesc.mSampleCount;
+		pipelineSettings.mSampleQuality = pSwapChain->ppSwapchainRenderTargets[0]->mDesc.mSampleQuality;
+		pipelineSettings.pRootSignature = pGraphRootSignature;
+		pipelineSettings.pShaderProgram = pGraphShader;
+		pipelineSettings.pVertexLayout = &vertexLayout;
+		addPipeline(pRenderer, &pipelineSettings, &pGraphLinePipeline);
+
+		pipelineSettings.mPrimitiveTopo = PRIMITIVE_TOPO_TRI_STRIP;
+		addPipeline(pRenderer, &pipelineSettings, &pGraphTrianglePipeline);
+
+		pipelineSettings.mPrimitiveTopo = PRIMITIVE_TOPO_LINE_LIST;
+		addPipeline(pRenderer, &pipelineSettings, &pGraphLineListPipeline);
+		/********************************************************************/
 
 		return true;
 	}
 
 	void Unload()
 	{
-		waitForFences(pGraphicsQueue, 1, &pRenderCompleteFences[gFrameIndex % gImageCount]);
+		waitForFences(pGraphicsQueue, 1, &pRenderCompleteFences[gFrameIndex % gImageCount], true);
+
+		gAppUI.Unload();
+
+		removePipeline(pRenderer, pPipeline);
+		removePipeline(pRenderer, pSkyBoxDrawPipeline);
+		removePipeline(pRenderer, pGraphLineListPipeline);
+		removePipeline(pRenderer, pGraphLinePipeline);
+		removePipeline(pRenderer, pGraphTrianglePipeline);
+
 		removeSwapChain(pRenderer, pSwapChain);
 	}
 
@@ -902,7 +965,7 @@ public:
 
 		TextureBarrier barrier = { pRenderTarget->pTexture, RESOURCE_STATE_RENDER_TARGET };
 		cmdResourceBarrier(cmd, 0, NULL, 1, &barrier, false);
-		cmdBeginRender(cmd, 1, &pRenderTarget, NULL, &loadActions);
+		cmdBindRenderTargets(cmd, 1, &pRenderTarget, NULL, &loadActions);
 		cmdSetViewport(cmd, 0.0f, 0.0f, (float)pRenderTarget->mDesc.mWidth, (float)pRenderTarget->mDesc.mHeight, 0.0f, 1.0f);
 		cmdSetScissor(cmd, 0, 0, pRenderTarget->mDesc.mWidth, pRenderTarget->mDesc.mHeight);
 		//// draw skybox
@@ -929,52 +992,53 @@ public:
 		cmdDraw(cmd, 36, 0);
 
 		static HiresTimer timer;
-		cmdUIBeginRender(cmd, pUIManager, 1, &pRenderTarget, NULL);
+		timer.GetUSec(true);
         
 #ifdef TARGET_IOS
-        // Draw the camera controller's virtual joysticks.
-        float extSide = min(mSettings.mHeight, mSettings.mWidth) * pCameraController->getVirtualJoystickExternalRadius();
-        float intSide = min(mSettings.mHeight, mSettings.mWidth) * pCameraController->getVirtualJoystickInternalRadius();
-        
-        vec2 joystickSize = vec2(extSide);
-        vec2 leftJoystickCenter = pCameraController->getVirtualLeftJoystickCenter();
-        vec2 leftJoystickPos = vec2(leftJoystickCenter.getX() * mSettings.mWidth, leftJoystickCenter.getY() * mSettings.mHeight) - 0.5f * joystickSize;
-        cmdUIDrawTexturedQuad(cmd, pUIManager, leftJoystickPos, joystickSize, pVirtualJoystickTex);
-        vec2 rightJoystickCenter = pCameraController->getVirtualRightJoystickCenter();
-        vec2 rightJoystickPos = vec2(rightJoystickCenter.getX() * mSettings.mWidth, rightJoystickCenter.getY() * mSettings.mHeight) - 0.5f * joystickSize;
-        cmdUIDrawTexturedQuad(cmd, pUIManager, rightJoystickPos, joystickSize, pVirtualJoystickTex);
-        
-        joystickSize = vec2(intSide);
-        leftJoystickCenter = pCameraController->getVirtualLeftJoystickPos();
-        leftJoystickPos = vec2(leftJoystickCenter.getX() * mSettings.mWidth, leftJoystickCenter.getY() * mSettings.mHeight) - 0.5f * joystickSize;
-        cmdUIDrawTexturedQuad(cmd, pUIManager, leftJoystickPos, joystickSize, pVirtualJoystickTex);
-        rightJoystickCenter = pCameraController->getVirtualRightJoystickPos();
-        rightJoystickPos = vec2(rightJoystickCenter.getX() * mSettings.mWidth, rightJoystickCenter.getY() * mSettings.mHeight) - 0.5f * joystickSize;
-        cmdUIDrawTexturedQuad(cmd, pUIManager, rightJoystickPos, joystickSize, pVirtualJoystickTex);
+		// Draw the camera controller's virtual joysticks.
+		float extSide = min(mSettings.mHeight, mSettings.mWidth) * pCameraController->getVirtualJoystickExternalRadius();
+		float intSide = min(mSettings.mHeight, mSettings.mWidth) * pCameraController->getVirtualJoystickInternalRadius();
+
+		float2 joystickSize = float2(extSide);
+		vec2 leftJoystickCenter = pCameraController->getVirtualLeftJoystickCenter();
+		float2 leftJoystickPos = float2(leftJoystickCenter.getX() * mSettings.mWidth, leftJoystickCenter.getY() * mSettings.mHeight) - 0.5f * joystickSize;
+		drawDebugTexture(cmd, leftJoystickPos.x, leftJoystickPos.y, joystickSize.x, joystickSize.y, pVirtualJoystickTex, 1.0f, 1.0f, 1.0f);
+		vec2 rightJoystickCenter = pCameraController->getVirtualRightJoystickCenter();
+		float2 rightJoystickPos = float2(rightJoystickCenter.getX() * mSettings.mWidth, rightJoystickCenter.getY() * mSettings.mHeight) - 0.5f * joystickSize;
+		drawDebugTexture(cmd, rightJoystickPos.x, rightJoystickPos.y, joystickSize.x, joystickSize.y, pVirtualJoystickTex, 1.0f, 1.0f, 1.0f);
+
+		joystickSize = float2(intSide);
+		leftJoystickCenter = pCameraController->getVirtualLeftJoystickPos();
+		leftJoystickPos = float2(leftJoystickCenter.getX() * mSettings.mWidth, leftJoystickCenter.getY() * mSettings.mHeight) - 0.5f * joystickSize;
+		drawDebugTexture(cmd, leftJoystickPos.x, leftJoystickPos.y, joystickSize.x, joystickSize.y, pVirtualJoystickTex, 1.0f, 1.0f, 1.0f);
+		rightJoystickCenter = pCameraController->getVirtualRightJoystickPos();
+		rightJoystickPos = float2(rightJoystickCenter.getX() * mSettings.mWidth, rightJoystickCenter.getY() * mSettings.mHeight) - 0.5f * joystickSize;
+		drawDebugTexture(cmd, rightJoystickPos.x, rightJoystickPos.y, joystickSize.x, joystickSize.y, pVirtualJoystickTex, 1.0f, 1.0f, 1.0f);
 #endif
 		
-        cmdUIDrawFrameTime(cmd, pUIManager, { 8, 15 }, "CPU ", timer.GetUSec(true) / 1000.0f);
+		drawDebugText(cmd, 8, 15, String::format("CPU %f ms", timer.GetUSecAverage() / 1000.0f), &gFrameTimeDraw);
 
 #if !defined(METAL)
-		cmdUIDrawText(cmd, pUIManager, { 8, 65 }, "Particle CPU Times");
+		drawDebugText(cmd, 8, 65, "Particle CPU Times", NULL);
 		for (uint32_t i = 0; i < gThreadCount; ++i)
 		{
-			cmdUIDrawFrameTime(cmd, pUIManager, { 8, 90.0f + i * 25.0f }, String().sprintf("- Thread %u  ", i), (float)pGpuProfilers[i]->mCumulativeCpuTime * 1000.0f);
+			drawDebugText(cmd, 8, 90.0f + i * 25.0f,
+				String::format("- Thread %u  %f ms", i, (float)pGpuProfilers[i]->mCumulativeCpuTime * 1000.0f), &gFrameTimeDraw);
 		}
 
-		cmdUIDrawText(cmd, pUIManager, { 8, 105 + gThreadCount * 25.0f }, "Particle GPU Times");
+		drawDebugText(cmd, 8, 105 + gThreadCount * 25.0f, "Particle GPU Times", NULL);
 		for (uint32_t i = 0; i < gThreadCount; ++i)
 		{
-			cmdUIDrawFrameTime(cmd, pUIManager, { 8, (130 + gThreadCount * 25.0f) + i * 25.0f }, String().sprintf("- Thread %u  ", i), (float)pGpuProfilers[i]->mCumulativeTime * 1000.0f);
+			drawDebugText(cmd, 8, (130 + gThreadCount * 25.0f) + i * 25.0f,
+				String::format("- Thread %u  %f ms", i, (float)pGpuProfilers[i]->mCumulativeTime * 1000.0f), &gFrameTimeDraw);
 		}
 #endif
-		cmdUIEndRender(cmd, pUIManager);
 
-		cmdEndRender(cmd, 1, &pRenderTarget, NULL);
+		gAppUI.Draw(cmd);
 		endCmd(cmd);
 
 		beginCmd(ppGraphCmds[frameIdx]);
-		for (uint i = 0; i < gCPUCoreCount; ++i)
+		for (uint i = 0; i < gCoresCount; ++i)
 		{
 			gGraphWidth = pRenderTarget->mDesc.mWidth / 6;
 			gGraphHeight = (pRenderTarget->mDesc.mHeight - 30 - gCoresCount * 10) / gCoresCount;
@@ -983,7 +1047,7 @@ public:
 			pCpuGraph[i].mViewPort.mOffsetY = 36 + i * (gGraphHeight + 4.0f);
 			pCpuGraph[i].mViewPort.mHeight = (float)gGraphHeight;
 
-			cmdBeginRender(ppGraphCmds[frameIdx], 1, &pRenderTarget, NULL, NULL);
+			cmdBindRenderTargets(ppGraphCmds[frameIdx], 1, &pRenderTarget, NULL, NULL);
 			cmdSetViewport(ppGraphCmds[frameIdx], pCpuGraph[i].mViewPort.mOffsetX, pCpuGraph[i].mViewPort.mOffsetY, pCpuGraph[i].mViewPort.mWidth, pCpuGraph[i].mViewPort.mHeight, 0.0f, 1.0f);
 			cmdSetScissor(ppGraphCmds[frameIdx], 0, 0, pRenderTarget->mDesc.mWidth, pRenderTarget->mDesc.mHeight);
 
@@ -1004,9 +1068,9 @@ public:
 			cmdBindPipeline(ppGraphCmds[frameIdx], pGraphLinePipeline);
 			cmdBindVertexBuffer(ppGraphCmds[frameIdx], 1, &pCpuGraph[i].mVertexBuffer[frameIdx]);
 			cmdDraw(ppGraphCmds[frameIdx], gSampleCount, 2 * gSampleCount);
-
-			cmdEndRender(ppGraphCmds[frameIdx], 1, &pRenderTarget, NULL);
 		}
+
+		cmdBindRenderTargets(ppGraphCmds[frameIdx], 0, NULL, NULL, NULL);
 
 		barrier = { pRenderTarget->pTexture, RESOURCE_STATE_PRESENT };
 		cmdResourceBarrier(ppGraphCmds[frameIdx], 0, NULL, 1, &barrier, true);
@@ -1033,14 +1097,31 @@ public:
 		// Stall if CPU is running "Swap Chain Buffer Count - 1" frames ahead of GPU
 		Fence* pNextFence = pRenderCompleteFences[(gFrameIndex + 1) % gImageCount];
 		FenceStatus fenceStatus;
-		getFenceStatus(pNextFence, &fenceStatus);
+		getFenceStatus(pRenderer, pNextFence, &fenceStatus);
 		if (fenceStatus == FENCE_STATUS_INCOMPLETE)
-			waitForFences(pGraphicsQueue, 1, &pNextFence);
+			waitForFences(pGraphicsQueue, 1, &pNextFence, false);
 	}
 
 	String GetName()
 	{
-		return "03_MultiThread";
+		return "UnitTest_03_MultiThread";
+	}
+
+	bool addSwapChain()
+	{
+		SwapChainDesc swapChainDesc = {};
+		swapChainDesc.pWindow = pWindow;
+		swapChainDesc.mPresentQueueCount = 1;
+		swapChainDesc.ppPresentQueues = &pGraphicsQueue;
+		swapChainDesc.mWidth = mSettings.mWidth;
+		swapChainDesc.mHeight = mSettings.mHeight;
+		swapChainDesc.mImageCount = gImageCount;
+		swapChainDesc.mSampleCount = SAMPLE_COUNT_1;
+		swapChainDesc.mColorFormat = getRecommendedSwapchainFormat(true);
+		swapChainDesc.mEnableVsync = false;
+		::addSwapChain(pRenderer, &swapChainDesc, &pSwapChain);
+
+		return pSwapChain != NULL;
 	}
 
 	void RecenterCameraView(float maxDistance, vec3 lookAt = vec3(0))
@@ -1058,10 +1139,52 @@ public:
 		pCameraController->moveTo(p);
 		pCameraController->lookAt(lookAt);
 	}
+#if defined(LINUX)
+	enum CPUStates
+	{
+		S_USER = 0,
+	    S_NICE,
+	    S_SYSTEM,
+	    S_IDLE,
+	    S_IOWAIT,
+	    S_IRQ,
+	    S_SOFTIRQ,
+	    S_STEAL,
+	    S_GUEST,
+	    S_GUEST_NICE,
+
+		NUM_CPU_STATES
+	};
+	typedef struct CPUData
+	{
+		String cpu;
+		size_t times[NUM_CPU_STATES];
+	} CPUData;
+
+	size_t GetIdleTime(const CPUData & e)
+	{
+		return  e.times[S_IDLE] +
+				e.times[S_IOWAIT];
+	}
+
+	size_t GetActiveTime(const CPUData & e)
+	{
+		return  e.times[S_USER] +
+				e.times[S_NICE] +
+				e.times[S_SYSTEM] +
+				e.times[S_IRQ] +
+				e.times[S_SOFTIRQ] +
+				e.times[S_STEAL] +
+				e.times[S_GUEST] +
+				e.times[S_GUEST_NICE];
+	}
+#endif
 
 	void CalCpuUsage()
 	{
 #ifdef _WIN32
+#if defined(_DURANGO)
+#else
 		HRESULT hr = NULL;
 		ULONG retVal;
 		UINT i;
@@ -1072,7 +1195,9 @@ public:
 		hr = pService->ExecQuery(bstr_t("WQL"), bstr_t("SELECT TimeStamp_Sys100NS, PercentProcessorTime, Frequency_PerfTime FROM Win32_PerfRawData_PerfOS_Processor"),
 			WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, NULL, &pEnumerator);
 		for (i = 0; i < gCoresCount; i++) {
-			hr = pEnumerator->Next(WBEM_INFINITE, 1, &pclassObj, &retVal);
+			//Waiting for inifinite blocks resources and app.
+			//Waiting for 15 ms (arbitrary) instead works much better
+			hr = pEnumerator->Next(15, 1, &pclassObj, &retVal);
 			if (!retVal) {
 				break;
 			}
@@ -1103,6 +1228,43 @@ public:
 		}
 
 		pEnumerator->Release();
+#endif //#if defined(_DURANGO)
+#elif(LINUX)
+		tinystl::vector<CPUData> entries;
+		entries.reserve(gCoresCount);
+		// Open cpu stat file
+		File fileStat = {};
+		fileStat.Open("/proc/stat", FM_ReadBinary, FSR_OtherFiles);
+
+		FILE* statHandle = (FILE*)fileStat.GetHandle();
+		if (statHandle) 
+		{
+			// While eof not detected, keep parsing the stat file
+			while (!feof(statHandle))
+			{
+				entries.emplace_back(CPUData());
+				CPUData & entry = entries.back();		
+				char dummyCpuName[256]; // dummy cpu name, not used.
+				fscanf(statHandle, "%s %zu %zu %zu %zu %zu %zu %zu %zu %zu %zu", &dummyCpuName, 
+							&entry.times[0], &entry.times[1], &entry.times[2], &entry.times[3],
+							&entry.times[4], &entry.times[5], &entry.times[6], &entry.times[7],
+							&entry.times[8], &entry.times[9]);
+			} 
+			// Close the cpu stat file
+			fileStat.Close();
+		}
+
+		for (uint32_t i = 0; i < gCoresCount; i++) 
+		{
+			float ACTIVE_TIME	= static_cast<float>(GetActiveTime(entries[i]));
+			float IDLE_TIME	= static_cast<float>(GetIdleTime(entries[i]));
+		
+			pCoresLoadData[i] = (ACTIVE_TIME - pOldPprocUsage[i]) / ((float)(IDLE_TIME + ACTIVE_TIME) - pOldTimeStamp[i])* 100.0f;
+			
+			pOldPprocUsage[i] = ACTIVE_TIME;
+			pOldTimeStamp[i] = IDLE_TIME + ACTIVE_TIME;
+		}
+
 #else
 		processor_info_array_t cpuInfo;
 		mach_msg_type_number_t numCpuInfo;
@@ -1156,8 +1318,9 @@ public:
 	int InitCpuUsage()
 	{
 		gCoresCount = 0;
-
 #ifdef _WIN32
+#if defined(_DURANGO)
+#else
 		IWbemClassObject *pclassObj;
 		IEnumWbemClassObject *pEnumerator;
 		HRESULT hr;
@@ -1205,7 +1368,15 @@ public:
 			pOldTimeStamp = (uint64_t*)conf_malloc(sizeof(uint64_t)*gCoresCount);
 			pOldPprocUsage = (uint64_t*)conf_malloc(sizeof(uint64_t)*gCoresCount);
 		}
-
+#endif
+#elif defined(LINUX)
+		int numCPU = sysconf(_SC_NPROCESSORS_ONLN);
+		gCoresCount = numCPU;
+				if (gCoresCount)
+		{
+			pOldTimeStamp = (uint64_t*)conf_malloc(sizeof(uint64_t)*gCoresCount);
+			pOldPprocUsage = (uint64_t*)conf_malloc(sizeof(uint64_t)*gCoresCount);
+		}
 #elif defined(__APPLE__)
 		processor_info_array_t cpuInfo;
 		mach_msg_type_number_t numCpuInfo;
@@ -1247,8 +1418,11 @@ public:
 	{
 		conf_free(pCpuData);
 #ifdef _WIN32
+#if defined(_DURANGO)
+#else
 		conf_free(pOldTimeStamp);
 		conf_free(pOldPprocUsage);
+#endif
 #endif
 		conf_free(pCoresLoadData);
 	}
@@ -1360,7 +1534,7 @@ public:
 		Cmd* cmd = data->ppCmds[data->mFrameIndex];
 		beginCmd(cmd);
 		cmdBeginGpuFrameProfile(cmd, data->pGpuProfiler);
-		cmdBeginRender(cmd, 1, &data->pRenderTarget, NULL);
+		cmdBindRenderTargets(cmd, 1, &data->pRenderTarget, NULL, NULL);
 		cmdSetViewport(cmd, 0.0f, 0.0f, (float)data->pRenderTarget->mDesc.mWidth, (float)data->pRenderTarget->mDesc.mHeight, 0.0f, 1.0f);
 		cmdSetScissor(cmd, 0, 0, data->pRenderTarget->mDesc.mWidth, data->pRenderTarget->mDesc.mHeight);
 
@@ -1381,12 +1555,11 @@ public:
 
 		for (int i = 0; i < (data->mDrawCount / 1000); ++i)  // in startdust project, they want to show how fast that vulkan can execute draw command, so each thread record a lot of commands
 			cmdDrawInstanced(cmd, 1000, data->mStartPoint + (i * 1000), 1);
-		cmdEndRender(cmd, 1, &data->pRenderTarget, NULL);
 
 		cmdEndGpuFrameProfile(cmd, data->pGpuProfiler);
 		endCmd(cmd);
 	}
-
+#if !defined(_DURANGO)
 	static bool cameraMouseMove(const RawMouseMoveEventData* data)
 	{
 		pCameraController->onMouseMove(data);
@@ -1404,7 +1577,7 @@ public:
 		pCameraController->onMouseWheel(data);
 		return true;
 	}
-    
+#endif
 #ifdef TARGET_IOS
     static bool cameraTouch(const TouchEventData* data)
     {
