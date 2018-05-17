@@ -6,8 +6,6 @@ language:
 
 before_install:
 - if [[ "$TRAVIS_OS_NAME" == "linux" ]]; then sudo apt-get install; fi
-- if [[ "$TRAVIS_OS_NAME" == "linux" ]]; then sudo apt-get install -y codelite; fi
-- /usr/bin/codelite-make
 
 install:
 - if [[ "$TRAVIS_OS_NAME" == "linux" ]]; then sudo apt-get -qq update; fi
@@ -15,6 +13,7 @@ install:
 - if [[ "$TRAVIS_OS_NAME" == "linux" ]]; then chmod ugo+x vulkansdk-linux-x86_64-1.1.73.0.run; fi
 - if [[ "$TRAVIS_OS_NAME" == "linux" ]]; then ./vulkansdk-linux-x86_64-1.1.73.0.run; fi
 - if [[ "$TRAVIS_OS_NAME" == "linux" ]]; then export VULKAN_SDK=$TRAVIS_BUILD_DIR/VulkanSDK/1.1.73.0/x86_64; fi
+- if [[ "$TRAVIS_OS_NAME" == "linux" ]]; then sudo apt-get install -y codelite; fi
 
 script:
 - python PyBuild.py
