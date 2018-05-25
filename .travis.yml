@@ -16,4 +16,5 @@ install:
 - if [[ "$TRAVIS_OS_NAME" == "linux" ]]; then sudo apt-get install -y codelite; fi
 
 script:
-- python PyBuild.py
+- /usr/bin/codelite-make -w "Examples_3/Visibility_Buffer/UbuntuCodelite/VisibilityBuffer.workspace" -p VisibilityBuffer -c Debug
+- /usr/bin/codelite-make -w "Examples_3/Visibility_Buffer/UbuntuCodelite/VisibilityBuffer.workspace" -p VisibilityBuffer -c Release
