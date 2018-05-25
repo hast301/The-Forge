@@ -16,4 +16,5 @@ install:
 - if [[ "$TRAVIS_OS_NAME" == "linux" ]]; then sudo apt-get update; fi
 
 script:
-- sudo ./Codelite-binaries/codelite-make
+- chmod ugo+x Codelite-binaries/codelite-make
+- ./Codelite-binaries/codelite-make
