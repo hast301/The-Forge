@@ -19,4 +19,4 @@ install:
 - if [[ "$TRAVIS_OS_NAME" == "linux" ]]; then sudo apt-get install ./codelite.deb; fi
 
 script:
-/usr/bin/codelite-make
+- /usr/bin/codelite-make
